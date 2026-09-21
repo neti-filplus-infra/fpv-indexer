@@ -1,0 +1,44 @@
+name: Check types and SQL
+on:
+  workflow_call:
+
+jobs:
+  build-db:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?connection_limit=50
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Init tmp db
+        run: npx prisma migrate reset --force --schema=./prisma/schema.prisma
+
+      - name: Build
+        env:
+          DATABASE_URL: postgres://postgres:postgres@host.docker.internal:5432/postgres?connection_limit=50
+        run: docker build --secret id=DATABASE_URL . --add-host=host.docker.internal:host-gateway

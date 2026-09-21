@@ -1,0 +1,135 @@
+name: Publish new build
+run-name: "Publish new images for ${{ github.ref_name }}, env: ${{ inputs.deploy_environment }}, triggered by ${{ github.actor }}; version: ${{ inputs.version || 'N/A'}}"
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Enter the version number"
+        required: true
+      deploy_environment:
+        required: false
+        description: "Select the environment to deploy to"
+        type: choice
+        options:
+          - none
+          - staging
+        default: none
+
+permissions:
+  contents: write
+
+jobs:
+  code-check:
+    uses: ./.github/workflows/code-check.yml
+
+  check-db:
+    needs:
+      - code-check
+    uses: ./.github/workflows/check-db.yml
+
+  bump-version:
+    runs-on: ubuntu-latest
+    if: ${{ github.ref_name == 'main' && inputs.version != '' }}
+    needs:
+      - code-check
+      - check-db
+    outputs:
+      commit_sha: ${{ steps.commit-version.outputs.commit_sha }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install semver
+        run: npm install semver
+
+      - name: Get current version
+        run: echo "current_version=$(jq -r '.version' package.json)" >> $GITHUB_ENV
+
+      - name: Validate and set new version
+        run: |
+          new_version="${{ inputs.version }}"
+          current_version="${{ env.current_version }}"
+
+          if npx semver $new_version -r "<=$current_version"; then
+            echo "Error: New version ($new_version) is lowest or the same as current ($current_version)"
+            exit 1
+          fi
+
+      - name: Bump version
+        run: |
+          npm version ${{ inputs.version }} --no-git-tag-version
+
+      - name: Git config
+        run: |
+          git config user.name "${GITHUB_ACTOR}"
+          git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+
+      - name: Commit version change
+        id: commit-version
+        run: |
+          git commit -am "Update version to ${{ inputs.version }}"
+          git push origin main
+          echo "commit_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+  build-and-publish:
+    needs:
+      - code-check
+      - check-db
+      - bump-version
+    if: |
+      always() &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    uses: ./.github/workflows/build-docker-image.yml
+    with:
+      version: ${{ inputs.version }}
+      commit_sha: ${{ github.ref_name == 'main' && inputs.version != '' && needs.bump-version.outputs.commit_sha || '' }}
+    secrets: inherit
+
+  git-tag:
+    runs-on: ubuntu-latest
+    needs:
+      - bump-version
+      - build-and-publish
+    if: ${{ github.ref_name == 'main' && inputs.version != '' && always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.commit_sha }}
+
+      - name: Create and push tag
+        run: |
+          TAG_NAME="v${{ inputs.version }}"
+          git tag $TAG_NAME
+          git push origin $TAG_NAME
+
+  trigger-staging-deploy:
+    runs-on: ubuntu-latest
+    needs:
+      - code-check
+      - build-and-publish
+    if: ${{ inputs.version != '' && inputs.deploy_environment != 'none' }}
+    steps:
+      - name: Trigger ${{ inputs.deploy_environment }} deploy
+        uses: neti-filplus-infra/filplus-deploy-action@main
+        with:
+          version: ${{ inputs.version }}
+          environment: ${{ inputs.deploy_environment }}
+          ecr-repository: fpv-indexer
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_IMAGE_DEPLOYER }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_IMAGE_DEPLOYER }}
+          aws-region: us-east-1

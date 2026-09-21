@@ -1,0 +1,94 @@
+name: Build docker image
+run-name: "Build image for ${{ github.ref_name }} triggered by ${{ github.actor }}; version: ${{ inputs.version || 'N/A'}}"
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: false
+        type: string
+      commit_sha:
+        required: false
+        type: string
+
+env:
+  ECR_REPOSITORY: "fpv-indexer"
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?connection_limit=50
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: "true"
+          registry-type: public
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          flavor: latest=false
+          images: public.ecr.aws/f4h6r4m9/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.version }},enable=${{inputs.version != ''}}
+            type=ref,event=branch,pattern={{branch}}
+            type=ref,event=pr,pattern={{branch}}
+
+      - name: Init tmp db
+        run: npx prisma migrate reset --force --schema=./prisma/schema.prisma
+
+      - name: Build tag and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          file: "Dockerfile.aws"
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          network: host
+          secrets: |
+            DATABASE_URL=${{ env.DATABASE_URL }}
