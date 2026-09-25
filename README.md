@@ -10,6 +10,16 @@ The application exposes a REST API for querying calculated quarterly volumes,
 indexing status, and related data, with interactive OpenAPI documentation at
 the root route.
 
+## Public instances
+
+| Network | URL | Notes |
+| --- | --- | --- |
+| Filecoin Calibration | https://fpv-indexer.calibration.allocator.tech/ | FIP-0118 calibnet rehearsal; `EPOCHS_PER_QUARTER=2880` (one quarter per day), `ACTIVATION_EPOCH=4109134` |
+| Filecoin Mainnet | TBD | to be stood up for the network upgrade |
+
+Interactive OpenAPI documentation is served at the root route of each
+instance. All endpoints are read-only and require no authentication.
+
 ## Deployment
 
 The application is distributed as a Docker image. The image generates the
