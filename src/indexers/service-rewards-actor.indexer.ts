@@ -3,7 +3,7 @@ import { type TransactionContext } from '@/db/db';
 import { ServiceRewardsActorParameterType } from '@/db/enums';
 import { ARCHIVE_NODE_CLIENT, RECENT_NODE_CLIENT } from '@/lib/constants';
 import { maxBigInt, numericToBigInt } from '@/lib/utils';
-import { ERC20TokenInfoService } from '@/services/erc-20-token-info.service';
+import { FilfoxApiService } from '@/services/filfox-api.service';
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { BigNumber } from 'bignumber.js';
@@ -11,6 +11,7 @@ import { uniq } from 'es-toolkit';
 import { AbiEvent, Address, getAbiItem } from 'viem';
 import type {
   ConfigShape,
+  ERC20Metadata,
   FilecoinPublicClient,
   LogForEvents,
 } from '../lib/types';
@@ -81,7 +82,7 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
     protected readonly recentNodeClient: FilecoinPublicClient,
     @Inject(ARCHIVE_NODE_CLIENT)
     protected readonly archiveNodeClient: FilecoinPublicClient,
-    private readonly erc20Service: ERC20TokenInfoService,
+    private readonly filfoxApiService: FilfoxApiService,
   ) {
     super(configService, recentNodeClient, archiveNodeClient);
   }
@@ -106,33 +107,42 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
   }
 
   protected async updateDb(tx: TransactionContext, logs: Logs): Promise<void> {
+    type MaybeMetadataPair = [Address, ERC20Metadata] | null;
+
     const admittedTokens = logs
       .filter((log) => log.eventName === 'AdmittedListsUpdated')
       .flatMap((log) =>
         log.args.stablecoins.map((token) => token.toLowerCase() as Address),
       );
     const uniqueAdmittedTokens = uniq(admittedTokens);
+    const maybeTokensMetadataPairs = await Promise.all(
+      uniqueAdmittedTokens.map<Promise<MaybeMetadataPair>>(
+        async (tokenAddress) => {
+          try {
+            const metadata =
+              await this.filfoxApiService.getERC20Metadata(tokenAddress);
+            return [tokenAddress, metadata];
+          } catch (error) {
+            const reason =
+              error instanceof Error ? error.message : String(error);
 
-    const admittedTokensDecimalsRequests = uniqueAdmittedTokens.map(
-      async (tokenAddress) => {
-        const decimals = await this.erc20Service.getTokenDecimals(tokenAddress);
-        return [tokenAddress, decimals] as const;
-      },
+            this.logger.warn(
+              `Skipping admitted token ${tokenAddress}: ${reason}`,
+            );
+
+            return null;
+          }
+        },
+      ),
     );
-    const admittedTokensSymbolsRequests = uniqueAdmittedTokens.map(
-      async (tokenAddress) => {
-        const symbol = await this.erc20Service.getTokenSymbol(tokenAddress);
-        return [tokenAddress, symbol] as const;
-      },
+
+    const tokensMap = new Map(
+      maybeTokensMetadataPairs.filter(
+        (maybePair): maybePair is [Address, ERC20Metadata] => {
+          return maybePair !== null;
+        },
+      ),
     );
-
-    const [admittedTokensDecimals, admittedTokensSymbols] = await Promise.all([
-      Promise.all(admittedTokensDecimalsRequests),
-      Promise.all(admittedTokensSymbolsRequests),
-    ]);
-
-    const decimalsMap = new Map(admittedTokensDecimals);
-    const symbolsMap = new Map(admittedTokensSymbols);
 
     for (const log of logs) {
       switch (log.eventName) {
@@ -177,7 +187,7 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
           break;
 
         case 'AdmittedListsUpdated':
-          await this.updatedAdmittedLists(tx, log, decimalsMap, symbolsMap);
+          await this.updatedAdmittedLists(tx, log, tokensMap);
           break;
 
         case 'PricingParamsUpdated':
@@ -522,8 +532,7 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
   private async updatedAdmittedLists(
     tx: TransactionContext,
     log: AdmittedListsUpdatedLog,
-    decimalsMap: Map<Address, number>,
-    symbolsMap: Map<Address, string>,
+    tokensMap: Map<Address, ERC20Metadata>,
   ) {
     const whitelistedContracts = await tx
       .selectFrom('filecoin_pay_contract')
@@ -604,24 +613,20 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
     }
 
     for (const tokenAddress of addedTokens) {
-      const decimals = decimalsMap.get(tokenAddress as Address);
+      const metadata = tokensMap.get(tokenAddress as Address);
 
-      if (decimals === undefined) {
-        throw new TypeError(`No decimals found for token ${tokenAddress}.`);
-      }
-
-      const symbol = symbolsMap.get(tokenAddress as Address);
-
-      if (symbol === undefined) {
-        throw new TypeError(`No symbol found for token ${tokenAddress}.`);
+      if (!metadata) {
+        // silently skip tokens for which metadata was not found, warning is
+        // already logged previously when fetching token metadata
+        continue;
       }
 
       await tx
         .insertInto('whitelisted_token')
         .values({
           token_address: tokenAddress,
-          token_decimals: decimals,
-          token_symbol: symbol,
+          token_decimals: metadata.decimals,
+          token_symbol: metadata.symbol,
           admittance_epoch: log.blockNumber.toString(),
           admittance_log_index: log.logIndex,
           admittance_tx_hash: log.transactionHash.toLowerCase(),

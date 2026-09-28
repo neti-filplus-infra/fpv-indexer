@@ -37,3 +37,8 @@ export type LogForEvents<EventType extends AbiEvent> = GetLogsReturnType<
   bigint,
   bigint
 >[number];
+
+export interface ERC20Metadata {
+  decimals: number;
+  symbol: string;
+}

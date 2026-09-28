@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
 import FilecoinPayV1ABI from '@/abis/filecoin-pay-v1.abi';
 import { db } from '@/db/db';
+import { ERC20Metadata } from '@/lib/types';
 import { ConfigSeedService } from '@/services/config-seed.service';
 import { IndexerOrchestratorService } from '@/services/indexer-orchestrator.service';
 import { QuartersService } from '@/services/quarters.service';
@@ -17,7 +18,6 @@ import {
   TransactionNotFoundError,
   zeroAddress,
 } from 'viem';
-import { vi } from 'vitest';
 import { AppModule } from '../src/app.module';
 import { ARCHIVE_NODE_CLIENT, RECENT_NODE_CLIENT } from '../src/lib/constants';
 import '../src/polyfill';
@@ -212,6 +212,25 @@ class TestERC20Service {
   }
 }
 
+class TestFilfoxApiService {
+  // eslint-disable-next-line @typescript-eslint/require-await
+  public async getContractDeploymentEpoch() {
+    return 0n;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
+  public async getERC20Metadata(tokenAddress: string): Promise<ERC20Metadata> {
+    switch (tokenAddress.toLowerCase()) {
+      case usdfcToken.address.toLowerCase():
+        return { decimals: usdfcToken.decimals, symbol: usdfcToken.symbol };
+      case axlUsdcToken.address.toLowerCase():
+        return { decimals: axlUsdcToken.decimals, symbol: axlUsdcToken.symbol };
+      default:
+        throw new Error(`No metadata for token ${tokenAddress}`);
+    }
+  }
+}
+
 describe('FIP-0118 adherence test', () => {
   let testFilecoinClient: TestFilecoinClient;
   let app: INestApplication;
@@ -229,10 +248,7 @@ describe('FIP-0118 adherence test', () => {
       .overrideProvider(ARCHIVE_NODE_CLIENT)
       .useValue(testFilecoinClient)
       .overrideProvider(FilfoxApiService)
-      .useValue({
-        // eslint-disable-next-line @typescript-eslint/require-await
-        getContractDeploymentEpoch: vi.fn(async () => 0n),
-      })
+      .useValue(new TestFilfoxApiService())
       .overrideProvider(ERC20TokenInfoService)
       .useValue(new TestERC20Service())
       .compile();
