@@ -327,43 +327,47 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
     const quarterStartEpoch =
       activationEpoch + epochsPerQuarter * (maxBigInt(logQuarter, 1n) - 1n);
     const quarterEndEpoch = quarterStartEpoch + epochsPerQuarter - 1n;
+    let cutoffStartEpoch = quarterEndEpoch + 1n;
 
-    const registrationCutoff = await tx
-      .selectFrom('service_rewards_actor_parameter')
-      .select('parameter_value')
-      .where(
-        'parameter_type',
-        '=',
-        ServiceRewardsActorParameterType.REGISTRATION_CUTOFF_EPOCHS,
-      )
-      .where('update_epoch', '<', quarterStartEpoch.toString())
-      .orderBy('update_epoch', 'desc')
-      .orderBy('update_log_index', 'desc')
-      .executeTakeFirst();
+    // check registration cutoff only from Q1 onwards
+    if (logQuarter >= 1n) {
+      const registrationCutoff = await tx
+        .selectFrom('service_rewards_actor_parameter')
+        .select('parameter_value')
+        .where(
+          'parameter_type',
+          '=',
+          ServiceRewardsActorParameterType.REGISTRATION_CUTOFF_EPOCHS,
+        )
+        .where('update_epoch', '<', quarterStartEpoch.toString())
+        .orderBy('update_epoch', 'desc')
+        .orderBy('update_log_index', 'desc')
+        .executeTakeFirst();
 
-    const noRegistrationCutoffError = new TypeError(
-      `Cannot bind pair ${pairTupleString} at epoch ${log.blockNumber} - no "REGISTRATION_CUTOFF" parameter found for quarter Q${logQuarter}.`,
-    );
-
-    if (!registrationCutoff) {
-      throw noRegistrationCutoffError;
-    }
-
-    const registrationCutoffEpochs = BigNumber(
-      registrationCutoff.parameter_value,
-    ).toBigInt();
-
-    if (registrationCutoffEpochs === null) {
-      throw noRegistrationCutoffError;
-    }
-
-    if (registrationCutoffEpochs > epochsPerQuarter) {
-      throw new TypeError(
-        `"REGISTRATION_CUTOFF" param for quarter Q${logQuarter} has value ${registrationCutoffEpochs} which is more than defined ${epochsPerQuarter} epochs per quarter.`,
+      const noRegistrationCutoffError = new TypeError(
+        `Cannot bind pair ${pairTupleString} at epoch ${log.blockNumber} - no "REGISTRATION_CUTOFF" parameter found for quarter Q${logQuarter}.`,
       );
-    }
 
-    const cutoffStartEpoch = quarterEndEpoch - registrationCutoffEpochs + 1n;
+      if (!registrationCutoff) {
+        throw noRegistrationCutoffError;
+      }
+
+      const registrationCutoffEpochs = BigNumber(
+        registrationCutoff.parameter_value,
+      ).toBigInt();
+
+      if (registrationCutoffEpochs === null) {
+        throw noRegistrationCutoffError;
+      }
+
+      if (registrationCutoffEpochs > epochsPerQuarter) {
+        throw new TypeError(
+          `"REGISTRATION_CUTOFF" param for quarter Q${logQuarter} has value ${registrationCutoffEpochs} which is more than defined ${epochsPerQuarter} epochs per quarter.`,
+        );
+      }
+
+      cutoffStartEpoch = quarterEndEpoch - registrationCutoffEpochs + 1n;
+    }
 
     const [fromEpoch, fromLogIndex] = (() => {
       // registration falls into registration cutoff, binding applies from the
