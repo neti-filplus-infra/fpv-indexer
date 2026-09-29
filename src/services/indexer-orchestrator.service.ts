@@ -15,6 +15,7 @@ import { ConfigService } from '@nestjs/config';
 import { CronExpression, SchedulerRegistry } from '@nestjs/schedule';
 import { CronJob } from 'cron';
 import { Address, isAddress, isAddressEqual, zeroAddress } from 'viem';
+import { ERC20TokenInfoService } from './erc-20-token-info.service';
 import { FilfoxApiService } from './filfox-api.service';
 
 @Injectable()
@@ -31,6 +32,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
     private readonly configService: ConfigService<ConfigShape, true>,
     private readonly schedulerRegistry: SchedulerRegistry,
     private readonly filfoxApiService: FilfoxApiService,
+    private readonly erc20Service: ERC20TokenInfoService,
     private readonly serviceRewardsActorIndxer: ServiceRewardsActorIndexer,
     private readonly filecoinPayV1Indexer: FilecoinPayV1Indexer,
     private readonly auctionableTokenIndexer: AuctionableTokenIndexer,
@@ -166,20 +168,39 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
     const auctionableTokenIndexerRuns = auctionableTokens.map(async (token) => {
       const tokenAddress = token.token.toLowerCase();
 
-      if (isAddress(tokenAddress)) {
-        const minBlockNumber =
-          await this.filfoxApiService.getContractDeploymentEpoch(tokenAddress);
-
-        await this.auctionableTokenIndexer.run({
-          contractAddress: tokenAddress,
-          minBlockNumber,
-          maxBlockNumber: null,
-        });
-      } else {
+      if (!isAddress(tokenAddress)) {
         this.logger.warn(
-          `Invalid rail token "${tokenAddress}" found in database.`,
+          `Rail with invalid token address "${tokenAddress}" found in database. Token won't be indexed.`,
         );
+
+        return;
       }
+
+      let isERC20 = false;
+
+      try {
+        await this.filfoxApiService.getERC20Metadata(tokenAddress);
+        isERC20 = true;
+      } catch {
+        isERC20 = await this.erc20Service.isValidERC20(tokenAddress);
+      }
+
+      if (!isERC20) {
+        this.logger.warn(
+          `Token "${tokenAddress}" found in database does not point to a valid ERC20 contract and won't be indexer.`,
+        );
+
+        return;
+      }
+
+      const minBlockNumber =
+        await this.filfoxApiService.getContractDeploymentEpoch(tokenAddress);
+
+      await this.auctionableTokenIndexer.run({
+        contractAddress: tokenAddress,
+        minBlockNumber,
+        maxBlockNumber: null,
+      });
     });
 
     await Promise.all(auctionableTokenIndexerRuns);
