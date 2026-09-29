@@ -3,7 +3,14 @@ import { RECENT_NODE_CLIENT } from '@/lib/constants';
 import type { FilecoinPublicClient } from '@/lib/types';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { Inject, Injectable } from '@nestjs/common';
-import { isAddress, isAddressEqual, zeroAddress, type Address } from 'viem';
+import {
+  BaseError,
+  ContractFunctionRevertedError,
+  isAddress,
+  isAddressEqual,
+  zeroAddress,
+  type Address,
+} from 'viem';
 
 @Injectable()
 export class ERC20TokenInfoService {
@@ -65,6 +72,33 @@ export class ERC20TokenInfoService {
     return decimals;
   }
 
+  public async isValidERC20(tokenAddress: string): Promise<boolean> {
+    this.assertValidTokenAddress(tokenAddress);
+
+    const bytecode = await this.recentNodeClient.getCode({
+      address: tokenAddress,
+    });
+
+    if (!bytecode || bytecode === '0x') {
+      return false;
+    }
+
+    try {
+      await Promise.all([
+        this.getTokenDecimals(tokenAddress),
+        this.getTokenSymbol(tokenAddress),
+      ]);
+    } catch (error) {
+      if (this.isContractRevert(error)) {
+        return false;
+      } else {
+        throw error;
+      }
+    }
+
+    return true;
+  }
+
   private assertValidTokenAddress(
     tokenAddress: string,
   ): asserts tokenAddress is Address {
@@ -73,5 +107,17 @@ export class ERC20TokenInfoService {
         `"${tokenAddress}" is not a valid ERC20 token address`,
       );
     }
+  }
+
+  private isContractRevert(error: unknown): boolean {
+    if (!(error instanceof BaseError)) {
+      return false;
+    }
+
+    const cause = error.walk(
+      (innerCause) => innerCause instanceof ContractFunctionRevertedError,
+    );
+
+    return cause instanceof ContractFunctionRevertedError;
   }
 }

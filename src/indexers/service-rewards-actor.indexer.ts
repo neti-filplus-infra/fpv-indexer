@@ -3,6 +3,7 @@ import { type TransactionContext } from '@/db/db';
 import { ServiceRewardsActorParameterType } from '@/db/enums';
 import { ARCHIVE_NODE_CLIENT, RECENT_NODE_CLIENT } from '@/lib/constants';
 import { maxBigInt, numericToBigInt } from '@/lib/utils';
+import { ERC20TokenInfoService } from '@/services/erc-20-token-info.service';
 import { FilfoxApiService } from '@/services/filfox-api.service';
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -83,6 +84,7 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
     @Inject(ARCHIVE_NODE_CLIENT)
     protected readonly archiveNodeClient: FilecoinPublicClient,
     private readonly filfoxApiService: FilfoxApiService,
+    private readonly erc20Service: ERC20TokenInfoService,
   ) {
     super(configService, recentNodeClient, archiveNodeClient);
   }
@@ -121,16 +123,25 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
           try {
             const metadata =
               await this.filfoxApiService.getERC20Metadata(tokenAddress);
+
             return [tokenAddress, metadata];
-          } catch (error) {
-            const reason =
-              error instanceof Error ? error.message : String(error);
+          } catch {
+            const isERC20 = await this.erc20Service.isValidERC20(tokenAddress);
 
-            this.logger.warn(
-              `Skipping admitted token ${tokenAddress}: ${reason}`,
-            );
+            if (!isERC20) {
+              this.logger.warn(
+                `Skipping admitted token ${tokenAddress}; Not valid ERC20 token.`,
+              );
 
-            return null;
+              return null;
+            }
+
+            const [decimals, symbol] = await Promise.all([
+              this.erc20Service.getTokenDecimals(tokenAddress),
+              this.erc20Service.getTokenSymbol(tokenAddress),
+            ]);
+
+            return [tokenAddress, { decimals, symbol }];
           }
         },
       ),

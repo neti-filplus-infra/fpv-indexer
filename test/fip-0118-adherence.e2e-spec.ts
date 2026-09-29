@@ -15,6 +15,7 @@ import {
   Address,
   encodeFunctionData,
   Hash,
+  isAddressEqual,
   TransactionNotFoundError,
   zeroAddress,
 } from 'viem';
@@ -199,6 +200,13 @@ class TestERC20Service {
   // eslint-disable-next-line @typescript-eslint/require-await
   public async getTokenSymbol(address: string) {
     return this.getToken(address).symbol;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
+  public async isValidERC20(address: string) {
+    const token = this.tokensMap.get(address);
+
+    return !!token && !isAddressEqual(token.address, zeroAddress);
   }
 
   private getToken(address: string): TestToken {
