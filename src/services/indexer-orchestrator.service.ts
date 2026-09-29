@@ -304,9 +304,16 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
         await tx.deleteFrom('filecoin_pay_payment').executeTakeFirst();
         await tx.deleteFrom('filecoin_pay_rail').executeTakeFirst();
         await tx.deleteFrom('filecoin_pay_contract').executeTakeFirst();
+        await tx.deleteFrom('quarter_bound_volume').executeTakeFirst();
         await tx.deleteFrom('service_pair').executeTakeFirst();
+        await tx
+          .deleteFrom('service_orchestrator_quarterly_volume')
+          .executeTakeFirst();
         await tx.deleteFrom('service_orchestrator').executeTakeFirst();
         await tx.deleteFrom('whitelisted_token').executeTakeFirst();
+        await tx
+          .deleteFrom('service_rewards_actor_parameter')
+          .executeTakeFirst();
         await tx.deleteFrom('indexer_state').executeTakeFirst();
       });
 
