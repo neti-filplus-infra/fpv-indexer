@@ -28,7 +28,7 @@ import { createObserveModule } from '@nestjs/observe';
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
 const observeAppKey = process.env.OBSERVE_APP_KEY ?? null;
-const observeAppSecret = process.env.OBSERVE_APP_KEY ?? null;
+const observeAppSecret = process.env.OBSERVE_APP_SECRET ?? null;
 
 const recentNodeClientProvider: FactoryProvider<FilecoinPublicClient> = {
   provide: RECENT_NODE_CLIENT,

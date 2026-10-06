@@ -3226,14 +3226,115 @@ describe('FIP-0118 adherence test', () => {
     expect(postingsB.length).toBe(1);
   });
 
+  // Tests:
+  // - service orchestrators can be admitted again with same address after removal
+  // - pairs remain unbound after re-admission without explicit binding
+  it('Allows orchestrator re-admission', async () => {
+    const indexerOrchestrator = app.get(IndexerOrchestratorService);
+    const q1 = app.get(QuartersService).getQuarterByIndex(1);
+
+    testFilecoinClient.resetWithLogs([
+      pricingParamsUpdatedLog({
+        address: serviceRewardsActor,
+        blockNumber: 1n,
+        logIndex: 0,
+        minLotFloor: 0n,
+        minLotAlphaDen: 1n,
+        minLotAlphaNum: 400n,
+        priceBand: 30_000n,
+        registrationCutoff: 5n,
+      }),
+      admittedListsUpdatedLog({
+        address: serviceRewardsActor,
+        blockNumber: 1n,
+        logIndex: 1,
+        filecoinPayContracts: [filecoinPayContractA],
+        stablecoins: [usdfcToken.address],
+      }),
+      railCreatedLog({
+        address: filecoinPayContractA,
+        blockNumber: 1n,
+        logIndex: 2,
+        railId: 1n,
+        token: usdfcToken.address,
+        payee: zeroAddress,
+        payer: payerA,
+        operator: operatorA,
+        validator: zeroAddress,
+      }),
+
+      // q1
+      orchestratorAdmittedLog({
+        address: serviceRewardsActor,
+        blockNumber: q1.startEpoch,
+        logIndex: 0,
+        orchestrator: orchestratorA,
+        wallet: orchestratorA,
+      }),
+      bindingDeclaredLog({
+        address: serviceRewardsActor,
+        blockNumber: q1.startEpoch,
+        logIndex: 1,
+        orchestrator: orchestratorA,
+        payer: payerA,
+        operator: operatorA,
+      }),
+      railSettledLog({
+        address: filecoinPayContractA,
+        blockNumber: q1.startEpoch,
+        logIndex: 2,
+        railId: 1n,
+        totalSettledAmount: usdfcToken.formatNumericValue(1),
+        totalNetPayeeAmount: usdfcToken.formatNumericValue(1),
+        operatorCommission: 0n,
+        networkFee: 0n,
+      }),
+      orchestratorRemovedLog({
+        address: serviceRewardsActor,
+        blockNumber: q1.startEpoch,
+        logIndex: 3,
+        orchestrator: orchestratorA,
+      }),
+      railSettledLog({
+        address: filecoinPayContractA,
+        blockNumber: q1.startEpoch,
+        logIndex: 4,
+        railId: 1n,
+        totalSettledAmount: usdfcToken.formatNumericValue(10),
+        totalNetPayeeAmount: usdfcToken.formatNumericValue(10),
+        operatorCommission: 0n,
+        networkFee: 0n,
+      }),
+      orchestratorAdmittedLog({
+        address: serviceRewardsActor,
+        blockNumber: q1.startEpoch,
+        logIndex: 5,
+        orchestrator: orchestratorA,
+        wallet: orchestratorA,
+      }),
+    ]);
+
+    testFilecoinClient.forwardTo(q1.endEpoch + 1n);
+    await indexerOrchestrator.execute();
+
+    // Validation
+    const response = await request(app.getHttpServer())
+      .get(`/volume/1/${orchestratorA}`)
+      .expect(200);
+
+    expect(response.body).toMatchObject({
+      volumeAttoUsd: usdfcToken.formatNumericValue(1).toString(),
+    });
+  });
+
   async function resetDatabase() {
     const query = sql`
       TRUNCATE TABLE
         filecoin_pay_payment, filecoin_pay_fee_auction, filecoin_pay_rail,
-        service_pair, service_orchestrator, whitelisted_token,
-        filecoin_pay_contract, service_rewards_actor_parameter,
-        quarter_bound_volume, application_config, indexer_state,
-        service_orchestrator_quarterly_volume
+        service_pair, service_orchestrator_admission, service_orchestrator, 
+        whitelisted_token, filecoin_pay_contract, 
+        service_rewards_actor_parameter, quarter_bound_volume, 
+        application_config, indexer_state, service_orchestrator_quarterly_volume
       CASCADE;
 
       REFRESH MATERIALIZED VIEW CONCURRENTLY qualified_price_periods_mv;

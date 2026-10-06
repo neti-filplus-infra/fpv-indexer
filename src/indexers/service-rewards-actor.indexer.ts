@@ -162,9 +162,21 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
             .insertInto('service_orchestrator')
             .values({
               id: log.args.orch.toLowerCase(),
+            })
+            .onConflict((cb) => {
+              // do nothing on conflict, must be re-admission
+              return cb.column('id').doNothing();
+            })
+            .executeTakeFirst();
+
+          await tx
+            .insertInto('service_orchestrator_admission')
+            .values({
+              service_orchestrator_id: log.args.orch.toLowerCase(),
               wallet: log.args.wallet.toLowerCase(),
-              registration_epoch: log.blockNumber.toString(),
-              registration_tx_hash: log.transactionHash.toLowerCase(),
+              admission_epoch: log.blockNumber.toString(),
+              admission_log_index: log.logIndex,
+              admission_tx_hash: log.transactionHash.toLowerCase(),
             })
             .executeTakeFirst();
 
@@ -176,11 +188,17 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
 
         case 'OrchestratorWalletReplaced':
           await tx
-            .updateTable('service_orchestrator')
+            .updateTable('service_orchestrator_admission')
             .set({
               wallet: log.args.newWallet.toLowerCase(),
             })
-            .where('id', '=', log.args.oldOrch.toLowerCase())
+            .where(
+              'service_orchestrator_id',
+              '=',
+              log.args.oldOrch.toLowerCase(),
+            )
+            // only update active admission
+            .where('removal_epoch', 'is', null)
             .executeTakeFirst();
 
           break;
@@ -247,15 +265,16 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
     const serviceOrchestrator = log.args.orch.toLowerCase();
     const txHash = log.transactionHash.toLowerCase();
 
-    // mark orchestrator as removed
+    // mark admission as removed
     await tx
-      .updateTable('service_orchestrator')
+      .updateTable('service_orchestrator_admission')
       .set({
-        removed: true,
         removal_epoch: epoch,
+        removal_log_index: logIndex,
         removal_tx_hash: txHash,
       })
-      .where('id', '=', serviceOrchestrator)
+      .where('service_orchestrator_id', '=', serviceOrchestrator)
+      .where('removal_epoch', 'is', null)
       .executeTakeFirst();
 
     // delete binding of removed orchestrator which binding period didn't start
@@ -277,12 +296,12 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
     // release other bindings of removed orchestrator
     await tx
       .updateTable('service_pair')
-      .where('service_orchestrator_id', '=', log.args.orch.toLowerCase())
+      .where('service_orchestrator_id', '=', serviceOrchestrator)
       .where('to_epoch', 'is', null)
       .set({
-        to_epoch: log.blockNumber.toString(),
+        to_epoch: epoch,
         to_log_index: logIndex,
-        unbinding_epoch: log.blockNumber.toString(),
+        unbinding_epoch: epoch,
         unbinding_tx_hash: txHash,
       })
       .execute();
