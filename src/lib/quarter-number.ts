@@ -1,5 +1,4 @@
-export type QuarterNumberInput =
-  QuarterNumber | `${'q' | 'Q'}${number}` | `${number}` | number;
+export type QuarterNumberInput = QuarterNumber | string | number;
 
 export function isQuarterNumberInput(
   input: unknown,
@@ -9,7 +8,7 @@ export function isQuarterNumberInput(
   }
 
   try {
-    QuarterNumber.from(input as QuarterNumberInput);
+    QuarterNumber.from(input);
     return true;
   } catch {
     return false;

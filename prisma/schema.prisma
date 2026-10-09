@@ -42,6 +42,18 @@ model service_rewards_actor_parameter {
   @@id([parameter_type, update_epoch, update_log_index])
 }
 
+model stream_weight_actor_parameters {
+  epoch         BigInt
+  log_index     Int
+  tx_hash       String
+  base_atto_usd Decimal @db.Decimal(78, 0)
+  step_ratio    Decimal @db.Decimal(78, 0)
+  steps         BigInt
+
+  @@id([epoch, log_index])
+  @@index([epoch])
+}
+
 model service_orchestrator {
   id                   String  @id
 
@@ -100,6 +112,19 @@ model quarter_bound_volume {
   volume_atto_usd Decimal
   epoch           BigInt
   tx_hash         String
+}
+
+model quarterly_gate_check {
+  epoch        BigInt
+  log_index    Int
+  tx_hash      String
+  quarter      BigInt
+  passed       Boolean
+  steps_after  BigInt
+  steps_before BigInt
+
+  @@id([epoch, log_index])
+  @@index([quarter])
 }
 
 model whitelisted_token {

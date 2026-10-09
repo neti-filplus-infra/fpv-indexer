@@ -39,4 +39,6 @@ export const CONFIG_SCHEMA = z.object({
   ACTIVATION_EPOCH: z.coerce.bigint().min(0n),
   EPOCHS_PER_QUARTER: z.coerce.bigint().min(1n),
   SERVICE_REWARDS_ACTOR_ADDRESS: evmAddress,
+  STREAM_WEIGHT_ACTOR_ADDRESS: evmAddress,
+  POST_PERIOD: z.coerce.bigint().min(0n),
 });

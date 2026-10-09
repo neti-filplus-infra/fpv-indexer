@@ -456,66 +456,77 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<EventType> {
       infer: true,
     });
 
-    const logQuarter = this.getQuarterForEpoch(log.blockNumber);
-    const quarterStartEpoch =
-      activationEpoch + epochsPerQuarter * (maxBigInt(logQuarter, 1n) - 1n);
+    const eventQuarter = this.getQuarterForEpoch(log.blockNumber);
+    const eventQuarterStartEpoch =
+      activationEpoch + epochsPerQuarter * (maxBigInt(eventQuarter, 1n) - 1n);
+    const newOrchestrator = log.args.orchestrator.toLowerCase();
+    const operator = log.args.operator.toLowerCase();
+    const payer = log.args.payer.toLowerCase();
+    const eventEpochString = log.blockNumber.toString();
+    const eventTxHash = log.transactionHash.toLowerCase();
 
-    // inherited pairs start from quarter start otherwise from the epoch and
-    // next log index they were reassigned at
-    const fromEpoch = log.args.inherit ? quarterStartEpoch : log.blockNumber;
-    const fromLogIndex = log.args.inherit ? 0 : log.logIndex + 1;
-    const unboundToEpoch = log.args.inherit ? fromEpoch - 1n : log.blockNumber;
-    const unboundToLogIndex = log.args.inherit
-      ? // since to_log_index was designed to be inclusive we need to create an
-        // unreachable max log number, here limit of the underlying DB field
-        2147483647
-      : log.logIndex;
+    const registrationQuery = tx.insertInto('service_pair').values({
+      service_orchestrator_id: newOrchestrator,
+      payer,
+      operator,
+      from_epoch: eventEpochString,
+      from_log_index: log.logIndex + 1,
+      binding_epoch: eventEpochString,
+      binding_tx_hash: eventTxHash,
+    });
 
-    // if binding got reassigned before it could start delete it to prevent
-    // primary key constraint violations
-    await tx
-      .deleteFrom('service_pair')
-      .where('payer', '=', log.args.payer.toLowerCase())
-      .where('operator', '=', log.args.operator.toLowerCase())
-      .where('to_epoch', 'is', null)
-      .where((eb) => {
-        return eb.or([
-          eb('from_epoch', '>', unboundToEpoch.toString()),
-          eb.and([
-            eb('from_epoch', '=', unboundToEpoch.toString()),
-            eb('from_log_index', '>', unboundToLogIndex),
-          ]),
-        ]);
-      })
-      .executeTakeFirst();
+    if (log.args.inherit) {
+      // Active bindings applying from log quarter or future quarters are
+      // reassigned to the new orchestrator.
+      const reassignResult = await tx
+        .updateTable('service_pair')
+        .set({
+          service_orchestrator_id: newOrchestrator,
+        })
+        .where('operator', '=', operator)
+        .where('payer', '=', payer)
+        .where('from_epoch', '>=', eventQuarterStartEpoch.toString())
+        .where('to_epoch', 'is', null)
+        .executeTakeFirst();
 
-    // unbind active pairs
-    await tx
-      .updateTable('service_pair')
-      .set({
-        to_epoch: unboundToEpoch.toString(),
-        to_log_index: unboundToLogIndex,
-        unbinding_epoch: log.blockNumber.toString(),
-        unbinding_tx_hash: log.transactionHash.toLowerCase(),
-      })
-      .where('operator', '=', log.args.operator.toLowerCase())
-      .where('payer', '=', log.args.payer.toLowerCase())
-      .where('to_epoch', 'is', null)
-      .execute();
+      // No reassignments means binding applies from before event quarter.
+      if (reassignResult.numUpdatedRows === 0n) {
+        // Unbind at event time...
+        await tx
+          .updateTable('service_pair')
+          .set({
+            to_epoch: eventEpochString,
+            to_log_index: log.logIndex,
+            unbinding_epoch: eventEpochString,
+            unbinding_tx_hash: eventTxHash,
+          })
+          .where('operator', '=', operator)
+          .where('payer', '=', payer)
+          .where('from_epoch', '<', eventQuarterStartEpoch.toString())
+          .where('to_epoch', 'is', null)
+          .execute();
 
-    // bind to new orchestrator
-    await tx
-      .insertInto('service_pair')
-      .values({
-        service_orchestrator_id: log.args.orchestrator.toLowerCase(),
-        payer: log.args.payer.toLowerCase(),
-        operator: log.args.operator.toLowerCase(),
-        from_epoch: fromEpoch.toString(),
-        from_log_index: fromLogIndex,
-        binding_epoch: log.blockNumber.toString(),
-        binding_tx_hash: log.transactionHash.toLowerCase(),
-      })
-      .executeTakeFirst();
+        // ..and register to new orchestrator
+        await registrationQuery.execute();
+      }
+    } else {
+      // Unbind active binding at event time...
+      await tx
+        .updateTable('service_pair')
+        .set({
+          to_epoch: eventEpochString,
+          to_log_index: log.logIndex,
+          unbinding_epoch: eventEpochString,
+          unbinding_tx_hash: eventTxHash,
+        })
+        .where('operator', '=', operator)
+        .where('payer', '=', payer)
+        .where('to_epoch', 'is', null)
+        .execute();
+
+      // ..and register to new orchestrator
+      await registrationQuery.execute();
+    }
   }
 
   private async cancelBinding(tx: TransactionContext, log: BindingCanceledLog) {

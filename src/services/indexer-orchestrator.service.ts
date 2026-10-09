@@ -1,9 +1,10 @@
 import { db } from '@/db/db';
-import { IndexerStatusDto } from '@/dto/indexer-status.dto';
 import { AuctionableTokenIndexer } from '@/indexers/auctionable-token.indexer';
 import { FilecoinPayV1Indexer } from '@/indexers/filecoin-pay-v1.indexer';
 import { ServiceRewardsActorIndexer } from '@/indexers/service-rewards-actor.indexer';
+import { StreamWeightActorIndexer } from '@/indexers/stream-weight-actor.indexer';
 import { packageMajorVersion, packageSemver } from '@/lib/constants';
+import { IndexerStatus } from '@/lib/schemas';
 import { ConfigShape } from '@/lib/types';
 import { minBigInt, numericToBigInt } from '@/lib/utils';
 import {
@@ -34,6 +35,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
     private readonly filfoxApiService: FilfoxApiService,
     private readonly erc20Service: ERC20TokenInfoService,
     private readonly serviceRewardsActorIndxer: ServiceRewardsActorIndexer,
+    private readonly streamWeightActorIndexer: StreamWeightActorIndexer,
     private readonly filecoinPayV1Indexer: FilecoinPayV1Indexer,
     private readonly auctionableTokenIndexer: AuctionableTokenIndexer,
   ) {}
@@ -115,6 +117,18 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
     await this.serviceRewardsActorIndxer.run({
       contractAddress: sraAddress.toLowerCase() as Address,
       minBlockNumber: sraStartBlock,
+      maxBlockNumber: null,
+    });
+
+    const swaAddress = this.configService.get('STREAM_WEIGHT_ACTOR_ADDRESS', {
+      infer: true,
+    });
+    const swaStartBlock =
+      await this.filfoxApiService.getContractDeploymentEpoch(swaAddress);
+
+    await this.streamWeightActorIndexer.run({
+      contractAddress: swaAddress.toLowerCase() as Address,
+      minBlockNumber: swaStartBlock,
       maxBlockNumber: null,
     });
 
@@ -206,7 +220,12 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
     await Promise.all(auctionableTokenIndexerRuns);
   }
 
-  public async getStatus(): Promise<IndexerStatusDto> {
+  public async getStatus(): Promise<IndexerStatus> {
+    type ContractMetadata = Omit<
+      IndexerStatus['contracts'][number],
+      'indexedUpTo'
+    >;
+
     const [savedContractsStates, filecoinPayContracts, auctionableTokens] =
       await Promise.all([
         db
@@ -233,29 +252,60 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
           .execute(),
       ]);
 
-    const indexedAddresses = [
-      this.configService
-        .get('SERVICE_REWARDS_ACTOR_ADDRESS', { infer: true })
-        .toLowerCase(),
-      ...filecoinPayContracts.map((contract) => contract.contract_address),
-      ...auctionableTokens.map((token) => token.token_address),
-    ];
+    const erc20CheckPairs = await Promise.all(
+      auctionableTokens.map(async (token) => {
+        const isErc20 = await this.erc20Service.isValidERC20(
+          token.token_address,
+        );
+        return [token.token_address, isErc20] as const;
+      }),
+    );
 
-    const contractsStates: IndexerStatusDto['contracts'] = [];
+    const auctionableErc20 = erc20CheckPairs
+      .filter(([, checkResult]) => checkResult)
+      .map(([tokenAddress]) => tokenAddress);
+    const contractsMetadata = [
+      {
+        type: 'SRA',
+        address: this.configService
+          .get('SERVICE_REWARDS_ACTOR_ADDRESS', { infer: true })
+          .toLowerCase(),
+      },
+      {
+        type: 'SWA',
+        address: this.configService
+          .get('STREAM_WEIGHT_ACTOR_ADDRESS', { infer: true })
+          .toLowerCase(),
+      },
+      ...filecoinPayContracts.map((contract) => {
+        return {
+          type: 'FilecoinPayV1',
+          address: contract.contract_address,
+        } satisfies ContractMetadata;
+      }),
+      ...auctionableErc20.map((tokenAddress) => {
+        return {
+          type: 'ERC20',
+          address: tokenAddress,
+        } satisfies ContractMetadata;
+      }),
+    ] satisfies ContractMetadata[];
 
-    for (const indexedAddress of indexedAddresses) {
+    const contractsStates: IndexerStatus['contracts'] = [];
+
+    for (const indexedContract of contractsMetadata) {
       const savedState = savedContractsStates.find(
-        (state) => state.contract_address === indexedAddress,
+        (state) => state.contract_address === indexedContract.address,
       );
 
       const indexedUpTo = savedState
         ? BigInt(savedState.end_block)
         : (await this.filfoxApiService.getContractDeploymentEpoch(
-            indexedAddress as Address,
+            indexedContract.address as Address,
           )) - 1n;
 
       contractsStates.push({
-        address: indexedAddress,
+        ...indexedContract,
         indexedUpTo,
       });
     }
@@ -315,6 +365,10 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
           .deleteFrom('service_rewards_actor_parameter')
           .executeTakeFirst();
         await tx.deleteFrom('indexer_state').executeTakeFirst();
+        await tx
+          .deleteFrom('stream_weight_actor_parameters')
+          .executeTakeFirst();
+        await tx.deleteFrom('quarterly_gate_check').executeTakeFirst();
       });
 
       this.logger.log('Cleanup completed.');

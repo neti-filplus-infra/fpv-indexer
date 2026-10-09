@@ -1,7 +1,6 @@
 import { db } from '@/db/db';
-import { ServiceOrchestratorQuarterlyVolumeParametersDto } from '@/dto/service-orchestrator-quarterly-volume-parameters.dto';
-import { ServiceOrchestratorQuarterlyVolumeDto } from '@/dto/service-orchestrator-quarterly-volume.dto';
-import { QuarterNumber } from '@/lib/quarter-number';
+import { QuarterNumber, QuarterNumberInput } from '@/lib/quarter-number';
+import { QuarterlyVolume } from '@/lib/schemas';
 import { ConfigShape } from '@/lib/types';
 import { divideBigInt, numericToBigInt } from '@/lib/utils';
 import { QuartersService } from '@/services/quarters.service';
@@ -18,17 +17,24 @@ export class VolumeCalculationService {
     private readonly quartersService: QuartersService,
   ) {}
 
-  public async getServiceOrchestratorQuarterlyVolume({
+  public async getQuarterlyVolume({
     serviceOrchestrator,
     quarterNumber,
-  }: ServiceOrchestratorQuarterlyVolumeParametersDto): Promise<ServiceOrchestratorQuarterlyVolumeDto> {
+  }: {
+    serviceOrchestrator?: string;
+    quarterNumber: QuarterNumberInput;
+  }): Promise<QuarterlyVolume> {
     const quarterNumberInt = QuarterNumber.from(quarterNumber).toNumber();
     const activationEpoch = this.configService.get('ACTIVATION_EPOCH', {
       infer: true,
     });
-    const quarter = this.quartersService.getQuarterByIndex(quarterNumberInt);
-    const quarterParameters =
-      await this.quartersService.getQuarterParameters(quarterNumberInt);
+
+    const [quarter, quarterParameters] = await Promise.all([
+      this.quartersService.getQuarterByIndex(quarterNumberInt),
+      this.quartersService.getQuarterParameters({
+        quarterNumber: QuarterNumber.from(quarterNumber),
+      }),
+    ]);
 
     if (
       quarterParameters.admittedFilecoinPayContractAddresses.length === 0 ||
@@ -46,7 +52,7 @@ export class VolumeCalculationService {
       };
     }
 
-    const stablecoinVolume = await db
+    const stablecoinPayments = db
       .selectFrom('filecoin_pay_payment as p')
       .innerJoin('filecoin_pay_rail as r', (join) => {
         return join
@@ -57,12 +63,44 @@ export class VolumeCalculationService {
             'r.filecoin_pay_contract_address',
           );
       })
-      .innerJoin('service_pair as sp', (join) => {
+      .innerJoin('whitelisted_token as t', (join) => {
         return join
-          .on('sp.service_orchestrator_id', '=', serviceOrchestrator)
-          .onRef('r.payer', '=', 'sp.payer')
-          .onRef('r.operator', '=', 'sp.operator')
+          .onRef('r.token', '=', 't.token_address')
           .on((eb) =>
+            eb.or([
+              eb('t.admittance_epoch', '<', eb.ref('p.settled_at_epoch')),
+              eb.and([
+                eb('t.admittance_epoch', '=', eb.ref('p.settled_at_epoch')),
+                eb('t.admittance_log_index', '<=', eb.ref('p.log_index')),
+              ]),
+            ]),
+          )
+          .on((eb) =>
+            eb.or([
+              eb('t.removal_epoch', 'is', null),
+              eb('p.settled_at_epoch', '<', eb.ref('t.removal_epoch')),
+              eb.and([
+                eb('p.settled_at_epoch', '=', eb.ref('t.removal_epoch')),
+                eb('p.log_index', '<=', eb.ref('t.removal_log_index')),
+              ]),
+            ]),
+          );
+      })
+      .where(
+        'p.filecoin_pay_contract_address',
+        'in',
+        quarterParameters.admittedFilecoinPayContractAddresses,
+      )
+      .where('r.token', 'in', quarterParameters.admittedStablecoins)
+      .where('p.settled_at_epoch', '>=', quarter.startEpoch.toString())
+      .where('p.settled_at_epoch', '<=', quarter.endEpoch.toString())
+      .where((eb) => {
+        let servicePairQuery = eb
+          .selectFrom('service_pair as sp')
+          .select('sp.service_orchestrator_id')
+          .whereRef('r.payer', '=', 'sp.payer')
+          .whereRef('r.operator', '=', 'sp.operator')
+          .where((eb) =>
             eb.or([
               eb('p.settled_at_epoch', '>', eb.ref('sp.from_epoch')),
               eb.and([
@@ -71,7 +109,7 @@ export class VolumeCalculationService {
               ]),
             ]),
           )
-          .on((eb) =>
+          .where((eb) =>
             eb.or([
               eb('sp.to_epoch', 'is', null),
               eb('p.settled_at_epoch', '<', eb.ref('sp.to_epoch')),
@@ -81,28 +119,37 @@ export class VolumeCalculationService {
               ]),
             ]),
           );
+
+        if (serviceOrchestrator) {
+          servicePairQuery = servicePairQuery.where(
+            'sp.service_orchestrator_id',
+            '=',
+            serviceOrchestrator.toLowerCase(),
+          );
+        }
+
+        return eb.exists(servicePairQuery);
       })
-      .innerJoin('whitelisted_token as t', 'r.token', 't.token_address')
-      .where(
-        'p.filecoin_pay_contract_address',
-        'in',
-        quarterParameters.admittedFilecoinPayContractAddresses,
-      )
-      .where('r.token', 'in', quarterParameters.admittedStablecoins)
-      .where('p.settled_at_epoch', '>=', quarter.startEpoch.toString())
-      .where('p.settled_at_epoch', '<=', quarter.endEpoch.toString())
+      .select(['p.id', 'p.total_amount', 't.token_decimals'])
+      .as('stablecoin_payments');
+
+    const stablecoinVolume = await db
+      .selectFrom(stablecoinPayments)
       .select((eb) => {
         const exponent = eb.fn<string>('POWER', [
           eb.cast(eb.val(10), 'numeric'),
-          eb(eb.val(18), '-', eb.ref('t.token_decimals')),
+          eb(eb.val(18), '-', eb.ref('stablecoin_payments.token_decimals')),
         ]);
-        const totalAmountAdjusted = eb('p.total_amount', '*', exponent);
+        const totalAmountAdjusted = eb(
+          'stablecoin_payments.total_amount',
+          '*',
+          exponent,
+        );
 
         return [
           eb.fn
             .coalesce(eb.fn.sum(totalAmountAdjusted), eb.val(0))
             .as('volume_atto_usd'),
-          eb.fn.coalesce(eb.fn.count('p.id'), eb.val(0)).as('payments_count'),
         ];
       })
       .executeTakeFirstOrThrow();
@@ -122,32 +169,7 @@ export class VolumeCalculationService {
                   'r.filecoin_pay_contract_address',
                 );
             })
-            .innerJoin('service_pair as sp', (join) => {
-              return join
-                .on('sp.service_orchestrator_id', '=', serviceOrchestrator)
-                .onRef('r.payer', '=', 'sp.payer')
-                .onRef('r.operator', '=', 'sp.operator')
-                .on((eb) => {
-                  return eb.or([
-                    eb('p.settled_at_epoch', '>', eb.ref('sp.from_epoch')),
-                    eb.and([
-                      eb('p.settled_at_epoch', '=', eb.ref('sp.from_epoch')),
-                      eb('p.log_index', '>=', eb.ref('sp.from_log_index')),
-                    ]),
-                  ]);
-                })
-                .on((eb) => {
-                  return eb.or([
-                    eb('sp.to_epoch', 'is', null),
-                    eb('p.settled_at_epoch', '<', eb.ref('sp.to_epoch')),
-                    eb.and([
-                      eb('p.settled_at_epoch', '=', eb.ref('sp.to_epoch')),
-                      eb('p.log_index', '<=', eb.ref('sp.to_log_index')),
-                    ]),
-                  ]);
-                });
-            })
-            .select('p.total_amount')
+            .select(['p.id', 'p.total_amount'])
             .where(
               'p.filecoin_pay_contract_address',
               'in',
@@ -155,6 +177,42 @@ export class VolumeCalculationService {
             )
             .where('r.token', '=', zeroAddress)
             .where('p.settled_at_epoch', '>=', activationEpoch.toString())
+            .where((eb) => {
+              let servicePairQuery = eb
+                .selectFrom('service_pair as sp')
+                .select('sp.service_orchestrator_id')
+                .whereRef('r.payer', '=', 'sp.payer')
+                .whereRef('r.operator', '=', 'sp.operator')
+                .where((eb) =>
+                  eb.or([
+                    eb('p.settled_at_epoch', '>', eb.ref('sp.from_epoch')),
+                    eb.and([
+                      eb('p.settled_at_epoch', '=', eb.ref('sp.from_epoch')),
+                      eb('p.log_index', '>=', eb.ref('sp.from_log_index')),
+                    ]),
+                  ]),
+                )
+                .where((eb) =>
+                  eb.or([
+                    eb('sp.to_epoch', 'is', null),
+                    eb('p.settled_at_epoch', '<', eb.ref('sp.to_epoch')),
+                    eb.and([
+                      eb('p.settled_at_epoch', '=', eb.ref('sp.to_epoch')),
+                      eb('p.log_index', '<=', eb.ref('sp.to_log_index')),
+                    ]),
+                  ]),
+                );
+
+              if (serviceOrchestrator) {
+                servicePairQuery = servicePairQuery.where(
+                  'sp.service_orchestrator_id',
+                  '=',
+                  serviceOrchestrator.toLowerCase(),
+                );
+              }
+
+              return eb.exists(servicePairQuery);
+            })
             .where((eb) => {
               return eb.or([
                 eb('p.settled_at_epoch', '<', eb.ref('qp.epoch')),
@@ -282,7 +340,7 @@ export class VolumeCalculationService {
         const volumeFil = divideBigInt(volumeAttoFil, 10n ** 18n, 2);
         const volumeAttoUsd = numericToBigInt(result.volume_atto_usd);
         const volumeUsd = divideBigInt(volumeAttoUsd, 10n ** 18n, 2);
-        const impliedRate = BigNumber(result.implied_rate).toString();
+        const impliedRate = BigNumber(result.implied_rate).toNumber();
 
         return {
           startEpoch: BigInt(result.start_epoch),

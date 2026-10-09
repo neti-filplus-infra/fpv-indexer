@@ -15,15 +15,23 @@ import { HttpModule } from '@nestjs/axios';
 import { CacheModule } from '@nestjs/cache-manager';
 import { Module, type FactoryProvider } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { createObserveModule } from '@nestjs/observe';
 import { ScheduleModule } from '@nestjs/schedule';
 import { filecoin } from 'viem/chains';
+import { GateController } from './controllers/gate.controller';
+import { ServiceOrchestratorsController } from './controllers/service-orchestrators.controller';
 import { VolumeController } from './controllers/volume.controller';
 import { ServiceRewardsActorIndexer } from './indexers/service-rewards-actor.indexer';
+import { StreamWeightActorIndexer } from './indexers/stream-weight-actor.indexer';
+import { BlockNumberService } from './services/block-number-service';
 import { ConfigSeedService } from './services/config-seed.service';
 import { ERC20TokenInfoService } from './services/erc-20-token-info.service';
 import { FilfoxApiService } from './services/filfox-api.service';
+import { GateCheckService } from './services/gate-check.service';
+import { ServiceOrchestratorService } from './services/service-orchestrator.service';
 import { VolumeCalculationService } from './services/volume-calculation.service';
-import { createObserveModule } from '@nestjs/observe';
+import { PaymentsService } from './services/payments.service';
+import { PaymentsController } from './controllers/payments.controller';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -76,19 +84,31 @@ const archiveNodeClientProvider: FactoryProvider<FilecoinPublicClient> = {
         ]
       : []),
   ],
-  controllers: [AppController, QuartersController, VolumeController],
+  controllers: [
+    AppController,
+    QuartersController,
+    ServiceOrchestratorsController,
+    VolumeController,
+    GateController,
+    PaymentsController,
+  ],
   providers: [
     recentNodeClientProvider,
     archiveNodeClientProvider,
     ERC20TokenInfoService,
     FilfoxApiService,
     ConfigSeedService,
+    BlockNumberService,
     IndexerOrchestratorService,
     ServiceRewardsActorIndexer,
+    StreamWeightActorIndexer,
     FilecoinPayV1Indexer,
     AuctionableTokenIndexer,
     QuartersService,
     VolumeCalculationService,
+    ServiceOrchestratorService,
+    GateCheckService,
+    PaymentsService,
   ],
 })
 export class AppModule {}

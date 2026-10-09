@@ -1,7 +1,13 @@
-import { ServiceOrchestratorQuarterlyVolumeParametersDto } from '@/dto/service-orchestrator-quarterly-volume-parameters.dto';
-import { ServiceOrchestratorQuarterlyVolumeDto } from '@/dto/service-orchestrator-quarterly-volume.dto';
+import {
+  type OrchestratorQuarterlyVolumeParameters,
+  orchestratorQuarterlyVolumeParametersSchema,
+  QuarterlyVolume,
+  quarterlyVolumeSchema,
+  type QuarterNumberFilter,
+  quarterNumberFilterSchema,
+} from '@/lib/schemas';
 import { VolumeCalculationService } from '@/services/volume-calculation.service';
-import { Controller, Get, Param, ValidationPipe } from '@nestjs/common';
+import { Controller, Get, Param, SerializeOptions } from '@nestjs/common';
 import { ApiOkResponse, ApiOperation } from '@nestjs/swagger';
 
 @Controller('/volume')
@@ -11,20 +17,35 @@ export class VolumeController {
   ) {}
 
   @Get('/:quarterNumber/:serviceOrchestrator')
+  @SerializeOptions({ schema: quarterlyVolumeSchema })
   @ApiOperation({
-    summary: 'Get quarterly volume of service orchestrator with details',
+    summary: 'Get quarterly volume of service orchestrator with details.',
   })
   @ApiOkResponse({
     description: `Service Orchestrator volume details in given quarter along 
       with FIL pricing prints.`,
-    type: ServiceOrchestratorQuarterlyVolumeDto,
+    standardSchema: quarterlyVolumeSchema,
   })
   public getServiceOrchestratorQuarterlyVolume(
-    @Param(new ValidationPipe({ transform: true }))
-    params: ServiceOrchestratorQuarterlyVolumeParametersDto,
-  ): Promise<ServiceOrchestratorQuarterlyVolumeDto> {
-    return this.volumeCalculationService.getServiceOrchestratorQuarterlyVolume(
-      params,
-    );
+    @Param({ schema: orchestratorQuarterlyVolumeParametersSchema })
+    params: OrchestratorQuarterlyVolumeParameters,
+  ): Promise<QuarterlyVolume> {
+    return this.volumeCalculationService.getQuarterlyVolume(params);
+  }
+
+  @Get('/:quarterNumber')
+  @SerializeOptions({ schema: quarterlyVolumeSchema })
+  @ApiOperation({
+    summary: 'Get quarterly volume with details.',
+  })
+  @ApiOkResponse({
+    description: `Quarterly volume details along with FIL pricing prints.`,
+    standardSchema: quarterlyVolumeSchema,
+  })
+  public getQuarterlyVolume(
+    @Param({ schema: quarterNumberFilterSchema })
+    params: QuarterNumberFilter,
+  ): Promise<QuarterlyVolume> {
+    return this.volumeCalculationService.getQuarterlyVolume(params);
   }
 }

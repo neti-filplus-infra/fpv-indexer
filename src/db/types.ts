@@ -75,6 +75,15 @@ export type quarter_bound_volume = {
     epoch: string;
     tx_hash: string;
 };
+export type quarterly_gate_check = {
+    epoch: string;
+    log_index: number;
+    tx_hash: string;
+    quarter: string;
+    passed: boolean;
+    steps_after: string;
+    steps_before: string;
+};
 export type service_orchestrator = {
     id: string;
 };
@@ -117,6 +126,14 @@ export type service_rewards_actor_parameter = {
     update_log_index: number;
     update_tx_hash: string;
 };
+export type stream_weight_actor_parameters = {
+    epoch: string;
+    log_index: number;
+    tx_hash: string;
+    base_atto_usd: string;
+    step_ratio: string;
+    steps: string;
+};
 export type whitelisted_token = {
     token_address: string;
     token_decimals: number;
@@ -137,10 +154,12 @@ export type DB = {
     indexer_state: indexer_state;
     qualified_price_periods_mv: qualified_price_periods_mv;
     quarter_bound_volume: quarter_bound_volume;
+    quarterly_gate_check: quarterly_gate_check;
     service_orchestrator: service_orchestrator;
     service_orchestrator_admission: service_orchestrator_admission;
     service_orchestrator_quarterly_volume: service_orchestrator_quarterly_volume;
     service_pair: service_pair;
     service_rewards_actor_parameter: service_rewards_actor_parameter;
+    stream_weight_actor_parameters: stream_weight_actor_parameters;
     whitelisted_token: whitelisted_token;
 };

@@ -1,33 +1,35 @@
 import { db } from '@/db/db';
 import { ServiceRewardsActorParameterType } from '@/db/enums';
 import { epochToQuarterNumber } from '@/db/utils';
-import { QuarterParametersDto } from '@/dto/quarter-parameters.dto';
-import { QuarterDto } from '@/dto/quarter.dto';
-import { ServiceOrchestratorQuarterlyVolumeParametersDto } from '@/dto/service-orchestrator-quarterly-volume-parameters.dto';
-import { ServiceOrchestratorQuarterlyVolumePostingDto } from '@/dto/service-orchestrator-quarterly-volume-posting.dto';
-import { RECENT_NODE_CLIENT } from '@/lib/constants';
-import { QuarterNumber, QuarterNumberInput } from '@/lib/quarter-number';
-import type { ConfigShape, FilecoinPublicClient } from '@/lib/types';
+import {
+  OrchestratorQuarterlyVolumeParameters,
+  OrchestratorQuarterlyVolumePosting,
+  Quarter,
+  QuarterNumberFilter,
+  QuarterParameters,
+} from '@/lib/schemas';
+import type { ConfigShape } from '@/lib/types';
 import { divideBigInt, numericToBigInt } from '@/lib/utils';
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { BigNumber } from 'bignumber.js';
+import { head, last, range } from 'es-toolkit';
 import { Address } from 'viem';
+import { BlockNumberService } from './block-number-service';
 
 @Injectable()
 export class QuartersService {
   constructor(
     private readonly configService: ConfigService<ConfigShape, true>,
-    @Inject(RECENT_NODE_CLIENT)
-    protected readonly recentNodeClient: FilecoinPublicClient,
+    private readonly blockNumberService: BlockNumberService,
   ) {}
 
-  public getQuarterByIndex(quarterNum: number): QuarterDto {
+  public async getQuarterByIndex(quarterNum: number): Promise<Quarter> {
     if (quarterNum < 1) {
       throw new TypeError('Quarter index cannot be lower than 1.');
     }
 
-    if (Math.abs(quarterNum) !== quarterNum) {
+    if (!Number.isInteger(quarterNum)) {
       throw new TypeError('Quarter index must be a integer.');
     }
 
@@ -37,19 +39,22 @@ export class QuartersService {
     const epochsPerQuarter = this.configService.get('EPOCHS_PER_QUARTER', {
       infer: true,
     });
+    const blockNumber = await this.blockNumberService.getBlockNumber();
 
     const startEpoch =
       activationEpoch + epochsPerQuarter * BigInt(quarterNum - 1);
+    const endEpoch = startEpoch + epochsPerQuarter - 1n;
 
     return {
       q: quarterNum,
       startEpoch,
-      endEpoch: startEpoch + epochsPerQuarter - 1n,
+      endEpoch,
+      completed: blockNumber > endEpoch,
     };
   }
 
-  public async getQuarters(): Promise<QuarterDto[]> {
-    const currentBlockNumber = await this.recentNodeClient.getBlockNumber();
+  public async getQuarters(): Promise<Quarter[]> {
+    const currentBlockNumber = await this.blockNumberService.getBlockNumber();
     const activationEpoch = this.configService.get('ACTIVATION_EPOCH', {
       infer: true,
     });
@@ -65,19 +70,20 @@ export class QuartersService {
 
     const quartersCount = Math.max(
       1,
-      Math.ceil(
-        divideBigInt(currentBlockNumber - activationEpoch, epochsPerQuarter),
-      ),
+      Number((currentBlockNumber - activationEpoch) / epochsPerQuarter + 1n),
     );
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    return [...Array(quartersCount)].map((_, index) =>
-      this.getQuarterByIndex(index + 1),
+    const results = await Promise.all(
+      range(quartersCount).map((q) => {
+        return this.getQuarterByIndex(q + 1);
+      }),
     );
+
+    return results;
   }
 
   public async getCurrentQuarterNum(): Promise<number | null> {
-    const currentBlockNumber = await this.recentNodeClient.getBlockNumber();
+    const currentBlockNumber = await this.blockNumberService.getBlockNumber();
     const activationEpoch = this.configService.get('ACTIVATION_EPOCH', {
       infer: true,
     });
@@ -85,17 +91,19 @@ export class QuartersService {
       infer: true,
     });
 
-    const quarterNum = Math.ceil(
-      divideBigInt(currentBlockNumber - activationEpoch, epochsPerQuarter),
-    );
+    if (currentBlockNumber < activationEpoch) {
+      return null;
+    }
 
-    return quarterNum < 1 ? null : quarterNum;
+    return Number(
+      (currentBlockNumber - activationEpoch) / epochsPerQuarter + 1n,
+    );
   }
 
-  public async getQuarterParameters(
-    quarterNum: QuarterNumberInput,
-  ): Promise<QuarterParametersDto> {
-    const quarterNumInt = QuarterNumber.from(quarterNum).toNumber();
+  public async getQuarterParameters({
+    quarterNumber,
+  }: QuarterNumberFilter): Promise<QuarterParameters> {
+    const quarterNumInt = quarterNumber.toNumber();
     const activationEpoch = this.configService.get('ACTIVATION_EPOCH', {
       infer: true,
     });
@@ -415,11 +423,16 @@ export class QuartersService {
   public async getServiceOrchestratorsQuarterlyVolumePostings({
     serviceOrchestrator,
     quarterNumber,
-  }: ServiceOrchestratorQuarterlyVolumeParametersDto): Promise<ServiceOrchestratorQuarterlyVolumePostingDto> {
-    type Posting =
-      ServiceOrchestratorQuarterlyVolumePostingDto['postings'][number];
+  }: OrchestratorQuarterlyVolumeParameters): Promise<OrchestratorQuarterlyVolumePosting> {
+    type Posting = OrchestratorQuarterlyVolumePosting['postings'][number];
 
-    const quarterNumInt = QuarterNumber.from(quarterNumber).toNumber();
+    const quarterNumInt = quarterNumber.toNumber();
+    const [blockNumber, quarter] = await Promise.all([
+      this.blockNumberService.getBlockNumber(),
+      this.getQuarterByIndex(quarterNumInt),
+    ]);
+    const postPeriod = this.configService.get('POST_PERIOD', { infer: true });
+    const postingWindowClosed = blockNumber > quarter.endEpoch + postPeriod;
 
     const results = await db
       .selectFrom('service_orchestrator as o')
@@ -462,8 +475,12 @@ export class QuartersService {
       return [...results, nextPosting];
     }, []);
 
-    const lastPosting = postings[0];
+    const firstPosting = last(postings);
+    const lastPosting = head(postings);
     const corrected = postings.some((posting) => posting.correction);
+    const missed = firstPosting
+      ? firstPosting.postingEpoch > quarter.endEpoch + postPeriod
+      : postingWindowClosed;
 
     return {
       serviceOrchestrator,
@@ -473,6 +490,7 @@ export class QuartersService {
           ? null
           : lastPosting.volumeAttoUsd,
       corrected,
+      missed,
       postingEpoch:
         !lastPosting || lastPosting.volumeAttoUsd === 0n
           ? null
@@ -482,7 +500,7 @@ export class QuartersService {
           ? null
           : lastPosting.postingTxHash,
       postings,
-    } satisfies ServiceOrchestratorQuarterlyVolumePostingDto;
+    } satisfies OrchestratorQuarterlyVolumePosting;
   }
 
   private createMissingParameterError(

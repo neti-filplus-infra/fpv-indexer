@@ -10,6 +10,18 @@ export interface CreateClientForChainParameters {
   authToken?: string | null;
 }
 
+export class StrictMap<K, V> extends Map<K, V> {
+  override get(key: K): V {
+    const value = super.get(key);
+
+    if (value === undefined) {
+      throw new Error(`Key "${String(key)}" does not exist in StrictMap.`);
+    }
+
+    return value;
+  }
+}
+
 export function validateConfig(config: Record<string, unknown>): ConfigShape {
   const result = CONFIG_SCHEMA.safeParse(config);
 
