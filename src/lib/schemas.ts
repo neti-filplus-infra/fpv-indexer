@@ -101,11 +101,11 @@ export const paymentsQuerySchema = z
     }),
     fromEpoch: epochInput.optional().meta({
       description:
-        'Return payments settled at or after this epoch (inclusive).',
+        'Return payments settled at or after this epoch, or, in the case of FIL payments, priced at or after this epoch (inclusive).',
     }),
     toEpoch: epochInput.optional().meta({
       description:
-        'Return payments settled at or before this epoch (inclusive).',
+        'Return payments settled at or before this epoch, or, in the case of FIL payments, priced at or before this epoch (inclusive).',
     }),
     countsTowardsVolume: z
       .stringbool()
@@ -318,6 +318,9 @@ export type ServiceOrchestratorsList = z.input<
 >;
 
 export const pricingPeriodSchema = z.object({
+  auctionTransactionHash: txHash.meta({
+    description: 'Hash of transaction that created this pricing period.',
+  }),
   startEpoch: epochOutput.meta({
     description: 'Epoch from which pricing period applies (inclusive).',
     example: '110',
@@ -327,11 +330,13 @@ export const pricingPeriodSchema = z.object({
     example: 0,
   }),
   endEpoch: epochOutput.meta({
-    description: 'Epoch to which pricing period applies (inclusive).',
+    description: `Epoch to which pricing period applies (inclusive). Also epoch 
+      at which fee auction that created this pricing period occurred.`,
     example: '120',
   }),
   endLogIndex: logIndex.meta({
-    description: 'Log index to which pricing period applies (inclusive).',
+    description: `Log index to which pricing period applies (inclusive). Also  
+      log index at which fee auction that created this pricing period occurred.`,
     example: 10,
   }),
   lotAttoUsd: uintOutput.meta({
@@ -508,7 +513,7 @@ export const gateTargetSchema = z.object({
   }),
   lastCheckEpoch: epochOutput.nullable().meta({
     description:
-      'Epoch at which last check occured. Null if no checks occured.',
+      'Epoch at which last check occurred. Null if no checks occurred.',
     example: 1234n.toString(),
   }),
   capReached: z.boolean(),
@@ -527,30 +532,87 @@ export const paginatedPaymentsListSchema = z
   .object({
     data: z.array(
       z.object({
-        filecoinPayContract: z.string().nonempty(),
-        epoch: epochOutput,
-        logIndex: z.number().int().min(0),
-        transactionHash: z.string().nonempty(),
-        railId: z.bigint().min(1n).pipe(bigIntToStringCodec),
-        payer: z.string().nonempty(),
-        payee: z.string().nonempty(),
-        operator: z.string().nonempty(),
-        tokenAddress: z.string().nonempty(),
-        tokenDecimals: z.number().int().min(0),
-        tokenSymbol: z.string().nonempty(),
-        totalAmountBaseUnits: uintOutput,
-        totalAmount: currencyPositiveValue,
-        netPayeeAmountBaseUnits: uintOutput,
-        netPayeeAmount: currencyPositiveValue,
-        networkFeeBaseUnits: uintOutput,
-        networkFee: currencyPositiveValue,
-        operatorComissionBaseUnits: uintOutput,
-        operatorComission: currencyPositiveValue,
-        serviceOrchestrator: z.string().nullable(),
-        filecoinPayContractWhitelisted: z.boolean(),
-        tokenWhitelisted: z.boolean(),
-        quarter: quarterSchema.nullable(),
-        pricingPeriod: pricingPeriodSchema.nullable(),
+        filecoinPayContract: z.string().nonempty().meta({
+          description:
+            'Address of Filecoin Pay contract the payment was made on.',
+        }),
+        epoch: epochOutput.meta({
+          description: 'Epoch at which the payment was made.',
+        }),
+        logIndex: z.number().int().min(0).meta({
+          description: 'Log index on which the payment event occurred.',
+        }),
+        transactionHash: z.string().nonempty().meta({
+          description: 'Hash of the transaction containing the payment.',
+        }),
+        railId: z.bigint().pipe(bigIntToStringCodec).meta({
+          description: 'ID of Filecoin Pay rail the payment was made on.',
+        }),
+        payer: z.string().nonempty().meta({
+          description: 'Address of the payer.',
+        }),
+        payee: z.string().nonempty().meta({
+          description: 'Address of the payee (recipient of the funds).',
+        }),
+        operator: z.string().nonempty().meta({
+          description: 'Rail operator contract address.',
+        }),
+        tokenAddress: z.string().nonempty().meta({
+          description:
+            'Address of the ERC20 token the payment was made in or zero address for FIL payments.',
+        }),
+        tokenDecimals: z.number().int().min(0).meta({
+          description:
+            'Number of decimal places of the token the payment was made in.',
+        }),
+        tokenSymbol: z.string().nonempty().meta({
+          description: 'Symbol of the token the payment was made in.',
+        }),
+        totalAmountBaseUnits: uintOutput.meta({
+          description: 'Total payment amount in underlying token base units.',
+        }),
+        totalAmount: currencyPositiveValue.meta({
+          description: 'totalAmountBaseUnits / 10^tokenDecimals',
+        }),
+        netPayeeAmountBaseUnits: uintOutput.meta({
+          description:
+            'Net payee amount (amount payee receives after fees and commissions) in underlying token base units.',
+        }),
+        netPayeeAmount: currencyPositiveValue.meta({
+          description: 'netPayeeAmountBaseUnits / 10^tokenDecimals',
+        }),
+        networkFeeBaseUnits: uintOutput.meta({
+          description: 'Network fee in underlying token base units.',
+        }),
+        networkFee: currencyPositiveValue.meta({
+          description: 'networkFeeBaseUnits / 10^tokenDecimals',
+        }),
+        operatorComissionBaseUnits: uintOutput.meta({
+          description: 'Operator commission in underlying token base units.',
+        }),
+        operatorComission: currencyPositiveValue.meta({
+          description: 'operatorComission / 10^tokenDecimals',
+        }),
+        serviceOrchestrator: z.string().nullable().meta({
+          description:
+            "Identifying address of the Service Orchestrator the payment is attributed to. Null if it can't be attributed to any Orchestrator.",
+        }),
+        filecoinPayContractWhitelisted: z.boolean().meta({
+          description:
+            'Flag telling if the Filecoin Pay contract address the payment was made on was whitelisted in the quarter the payment was made in.',
+        }),
+        tokenWhitelisted: z.boolean().meta({
+          description:
+            'Flag telling if the address of the token the payment was made in was whitelisted in the quarter the payment was made in. Always true for FIL payments.',
+        }),
+        quarter: quarterSchema.nullable().meta({
+          description:
+            'Quarter the payment was made in. Null if made before the activation epoch.',
+        }),
+        pricingPeriod: pricingPeriodSchema.nullable().meta({
+          description:
+            'Price period that prices this payment. Null if no qualifying price was found for the payment or if the payment was made in a token other than FIL.',
+        }),
       }),
     ),
   })

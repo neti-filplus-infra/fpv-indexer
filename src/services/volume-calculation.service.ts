@@ -273,6 +273,7 @@ export class VolumeCalculationService {
         ]);
 
         return [
+          'claim_tx_hash',
           eb.fn
             .coalesce(previousPeriodEpoch, eb.val(activationEpoch))
             .as('start_epoch'),
@@ -292,6 +293,7 @@ export class VolumeCalculationService {
         'qp.quarter_num',
         'qp.epoch',
         'qp.log_index',
+        'qp.claim_tx_hash',
         'qp.lot_atto_usd',
         'qp.claim_atto_fil',
       ])
@@ -343,6 +345,7 @@ export class VolumeCalculationService {
         const impliedRate = BigNumber(result.implied_rate).toNumber();
 
         return {
+          auctionTransactionHash: result.claim_tx_hash,
           startEpoch: BigInt(result.start_epoch),
           startLogIndex: parseInt(result.start_log_index.toString(), 10),
           endEpoch: BigInt(result.end_epoch),
