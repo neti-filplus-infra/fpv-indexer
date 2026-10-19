@@ -27,7 +27,7 @@ const evmAddress = z.custom<Address>((value) => {
   return typeof value === 'string' && isAddress(value);
 }, 'Invalid EVM address');
 
-export const CONFIG_SCHEMA = z.object({
+const strictConfigSchema = z.object({
   CHAIN_ID: supportedChainId.default(filecoin.id),
   INTERVAL_CRON_EXPRESSION: z.string().nullish(),
   FINALIZED_HEIGHT_MAX_DIFFERENCE: z.coerce
@@ -35,10 +35,9 @@ export const CONFIG_SCHEMA = z.object({
     .min(0n)
     .max(900n)
     .nullish(),
-  BATCH_BLOCK_SIZE: z.coerce
-    .bigint()
-    .min(1n)
-    .default(2n * 60n * 12n),
+  BATCH_BLOCK_SIZE: z.coerce.bigint().min(1n).optional(),
+  RECENT_NODE_BATCH_BLOCK_SIZE: z.coerce.bigint().min(1n),
+  ARCHIVE_NODE_BATCH_BLOCK_SIZE: z.coerce.bigint().min(1n),
   ARCHIVE_RPC_URL: z.url(),
   ARCHIVE_RPC_AUTH_TOKEN: z.string().nullish(),
   ARCHIVE_RPC_THRESHOLD: z.coerce.bigint().min(0n),
@@ -50,3 +49,20 @@ export const CONFIG_SCHEMA = z.object({
   STREAM_WEIGHT_ACTOR_ADDRESS: evmAddress,
   POST_PERIOD: z.coerce.bigint().min(0n),
 });
+
+export const CONFIG_SCHEMA = z.preprocess((input) => {
+  if (input && typeof input === 'object') {
+    const data = input as Record<string, unknown>;
+    const batchBlockSize = data.BATCH_BLOCK_SIZE ?? 2n * 60n * 12n;
+
+    return {
+      ...data,
+      RECENT_NODE_BATCH_BLOCK_SIZE:
+        data.RECENT_NODE_BATCH_BLOCK_SIZE ?? batchBlockSize,
+      ARCHIVE_NODE_BATCH_BLOCK_SIZE:
+        data.ARCHIVE_NODE_BATCH_BLOCK_SIZE ?? batchBlockSize,
+    };
+  }
+
+  return input;
+}, strictConfigSchema);

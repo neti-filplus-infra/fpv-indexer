@@ -101,9 +101,14 @@ export abstract class AbstractIndexer<EventType extends AbiEvent> {
     }
 
     const blockDifference = maxToBlock - fromBlock;
-    const batchBlockSize = this.configService.get('BATCH_BLOCK_SIZE', {
-      infer: true,
-    });
+    const batchBlockSize = this.configService.get(
+      shouldUseArchiveNode
+        ? 'ARCHIVE_NODE_BATCH_BLOCK_SIZE'
+        : 'RECENT_NODE_BATCH_BLOCK_SIZE',
+      {
+        infer: true,
+      },
+    );
     const toBlock =
       blockDifference >= batchBlockSize
         ? fromBlock + batchBlockSize - 1n

@@ -15,7 +15,7 @@ the root route.
 | Network | URL | Notes |
 | --- | --- | --- |
 | Filecoin Calibration | https://fpv-indexer.calibration.allocator.tech/ | FIP-0118 calibnet rehearsal; `EPOCHS_PER_QUARTER=2880` (one quarter per day), `ACTIVATION_EPOCH=4109134` |
-| Filecoin Mainnet | TBD | to be stood up for the network upgrade |
+| Filecoin Mainnet | https://fpv-indexer.allocator.tech/ | - |
 
 Interactive OpenAPI documentation is served at the root route of each
 instance. All endpoints are read-only and require no authentication.
