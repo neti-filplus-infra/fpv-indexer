@@ -1,7 +1,8 @@
 import {
+  type GateTarget,
+  gateTarget,
   type GateTargetParameters,
-  gateTargetParametersSchema,
-  gateTargetSchema,
+  gateTargetParameters,
 } from '@/lib/schemas';
 import { GateCheckService } from '@/services/gate-check.service';
 import { Controller, Get, Query, SerializeOptions } from '@nestjs/common';
@@ -12,18 +13,18 @@ export class GateController {
   constructor(private readonly gateCheckService: GateCheckService) {}
 
   @Get('/target')
-  @SerializeOptions({ schema: gateTargetSchema })
+  @SerializeOptions({ schema: gateTarget })
   @ApiOperation({
     summary: 'Get gate target.',
   })
   @ApiOkResponse({
     description: 'Gate target.',
-    standardSchema: gateTargetSchema,
+    standardSchema: gateTarget,
   })
   public getTarget(
-    @Query({ schema: gateTargetParametersSchema })
+    @Query({ schema: gateTargetParameters })
     params: GateTargetParameters,
-  ) {
+  ): Promise<GateTarget> {
     return this.gateCheckService.calculateGateTarget(params);
   }
 }

@@ -55,7 +55,7 @@ model stream_weight_actor_parameters {
 }
 
 model service_orchestrator {
-  id                   String  @id
+  id String @id
 
   admissions    service_orchestrator_admission[]
   service_pairs service_pair[]
@@ -86,8 +86,10 @@ model service_pair {
   to_epoch                BigInt?
   to_log_index            Int?
   binding_epoch           BigInt
+  binding_log_index       Int
   binding_tx_hash         String
   unbinding_epoch         BigInt?
+  unbinding_log_index     Int?
   unbinding_tx_hash       String?
   service_orchestrator    service_orchestrator @relation(fields: [service_orchestrator_id], references: [id], onUpdate: Cascade)
 
@@ -175,7 +177,9 @@ model filecoin_pay_payment {
   id                            String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   filecoin_pay_contract_address String
   tx_hash                       String
+  tx_position                   Int
   log_index                     Int
+  call_index                    Int?
   net_payee_amount              Decimal           @db.Decimal(78, 0)
   network_fee                   Decimal           @db.Decimal(78, 0)
   one_time                      Boolean
@@ -185,6 +189,8 @@ model filecoin_pay_payment {
   total_amount                  Decimal           @db.Decimal(78, 0)
   rail                          filecoin_pay_rail @relation(fields: [filecoin_pay_contract_address, rail_id], references: [filecoin_pay_contract_address, rail_id])
 
+  @@unique([tx_hash, log_index])
+  @@unique([tx_hash, tx_position, call_index], where: { call_index: { not: null } })
   @@index([filecoin_pay_contract_address, rail_id, settled_at_epoch])
 }
 
@@ -192,20 +198,24 @@ model filecoin_pay_fee_auction {
   id                            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   filecoin_pay_contract_address String
   tx_hash                       String
-  log_index                     Int
-  amount_actual                 Decimal @db.Decimal(78, 0)
+  tx_position                   Int
+  call_index                    Int
+  amount_requested              Decimal @db.Decimal(78, 0)
   fil_burned                    Decimal @db.Decimal(78, 0)
   token_address                 String
   auctioned_at_epoch            BigInt
+
+  @@unique([filecoin_pay_contract_address, auctioned_at_epoch, tx_position, call_index])
 }
 
 view qualified_price_periods_mv {
   quarter_num    Int
   epoch          BigInt
-  log_index      Int
+  tx_position    Int
+  call_index     Int
   lot_atto_usd   Decimal
   claim_atto_fil Decimal
   claim_tx_hash  String
 
-  @@unique([quarter_num, epoch, log_index])
+  @@unique([quarter_num, epoch, tx_position, call_index])
 }

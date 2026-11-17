@@ -1,10 +1,10 @@
 import {
   type OrchestratorQuarterlyVolumeParameters,
-  orchestratorQuarterlyVolumeParametersSchema,
+  orchestratorQuarterlyVolumeParameters,
   QuarterlyVolume,
-  quarterlyVolumeSchema,
+  quarterlyVolume,
   type QuarterNumberFilter,
-  quarterNumberFilterSchema,
+  quarterNumberFilter,
 } from '@/lib/schemas';
 import { VolumeCalculationService } from '@/services/volume-calculation.service';
 import { Controller, Get, Param, SerializeOptions } from '@nestjs/common';
@@ -17,33 +17,33 @@ export class VolumeController {
   ) {}
 
   @Get('/:quarterNumber/:serviceOrchestrator')
-  @SerializeOptions({ schema: quarterlyVolumeSchema })
+  @SerializeOptions({ schema: quarterlyVolume })
   @ApiOperation({
     summary: 'Get quarterly volume of service orchestrator with details.',
   })
   @ApiOkResponse({
     description: `Service Orchestrator volume details in given quarter along 
       with FIL pricing prints.`,
-    standardSchema: quarterlyVolumeSchema,
+    standardSchema: quarterlyVolume,
   })
   public getServiceOrchestratorQuarterlyVolume(
-    @Param({ schema: orchestratorQuarterlyVolumeParametersSchema })
+    @Param({ schema: orchestratorQuarterlyVolumeParameters })
     params: OrchestratorQuarterlyVolumeParameters,
   ): Promise<QuarterlyVolume> {
     return this.volumeCalculationService.getQuarterlyVolume(params);
   }
 
   @Get('/:quarterNumber')
-  @SerializeOptions({ schema: quarterlyVolumeSchema })
+  @SerializeOptions({ schema: quarterlyVolume })
   @ApiOperation({
     summary: 'Get quarterly volume with details.',
   })
   @ApiOkResponse({
     description: `Quarterly volume details along with FIL pricing prints.`,
-    standardSchema: quarterlyVolumeSchema,
+    standardSchema: quarterlyVolume,
   })
   public getQuarterlyVolume(
-    @Param({ schema: quarterNumberFilterSchema })
+    @Param({ schema: quarterNumberFilter })
     params: QuarterNumberFilter,
   ): Promise<QuarterlyVolume> {
     return this.volumeCalculationService.getQuarterlyVolume(params);

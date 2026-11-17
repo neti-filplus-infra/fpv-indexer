@@ -52,6 +52,15 @@ export class VolumeCalculationService {
       };
     }
 
+    const uniqueTokensMetadata = db
+      .selectFrom('whitelisted_token')
+      .distinctOn('token_address')
+      .select(['token_address', 'token_decimals'])
+      .orderBy('token_address')
+      .orderBy('admittance_epoch', 'desc')
+      .orderBy('admittance_log_index', 'desc')
+      .as('t');
+
     const stablecoinPayments = db
       .selectFrom('filecoin_pay_payment as p')
       .innerJoin('filecoin_pay_rail as r', (join) => {
@@ -63,29 +72,7 @@ export class VolumeCalculationService {
             'r.filecoin_pay_contract_address',
           );
       })
-      .innerJoin('whitelisted_token as t', (join) => {
-        return join
-          .onRef('r.token', '=', 't.token_address')
-          .on((eb) =>
-            eb.or([
-              eb('t.admittance_epoch', '<', eb.ref('p.settled_at_epoch')),
-              eb.and([
-                eb('t.admittance_epoch', '=', eb.ref('p.settled_at_epoch')),
-                eb('t.admittance_log_index', '<=', eb.ref('p.log_index')),
-              ]),
-            ]),
-          )
-          .on((eb) =>
-            eb.or([
-              eb('t.removal_epoch', 'is', null),
-              eb('p.settled_at_epoch', '<', eb.ref('t.removal_epoch')),
-              eb.and([
-                eb('p.settled_at_epoch', '=', eb.ref('t.removal_epoch')),
-                eb('p.log_index', '<=', eb.ref('t.removal_log_index')),
-              ]),
-            ]),
-          );
-      })
+      .innerJoin(uniqueTokensMetadata, 'r.token', 't.token_address')
       .where(
         'p.filecoin_pay_contract_address',
         'in',
@@ -115,7 +102,7 @@ export class VolumeCalculationService {
               eb('p.settled_at_epoch', '<', eb.ref('sp.to_epoch')),
               eb.and([
                 eb('p.settled_at_epoch', '=', eb.ref('sp.to_epoch')),
-                eb('p.log_index', '<=', eb.ref('sp.to_log_index')),
+                eb('p.log_index', '<', eb.ref('sp.to_log_index')),
               ]),
             ]),
           );
@@ -198,7 +185,7 @@ export class VolumeCalculationService {
                     eb('p.settled_at_epoch', '<', eb.ref('sp.to_epoch')),
                     eb.and([
                       eb('p.settled_at_epoch', '=', eb.ref('sp.to_epoch')),
-                      eb('p.log_index', '<=', eb.ref('sp.to_log_index')),
+                      eb('p.log_index', '<', eb.ref('sp.to_log_index')),
                     ]),
                   ]),
                 );
@@ -218,7 +205,13 @@ export class VolumeCalculationService {
                 eb('p.settled_at_epoch', '<', eb.ref('qp.epoch')),
                 eb.and([
                   eb('p.settled_at_epoch', '=', eb.ref('qp.epoch')),
-                  eb('p.log_index', '<', eb.ref('qp.log_index')),
+                  eb('p.tx_position', '<', eb.ref('qp.tx_position')),
+                ]),
+                eb.and([
+                  eb('p.settled_at_epoch', '=', eb.ref('qp.epoch')),
+                  eb('p.tx_position', '=', eb.ref('qp.tx_position')),
+                  eb('p.call_index', 'is not', null),
+                  eb('p.call_index', '<', eb.ref('qp.call_index')),
                 ]),
               ]);
             })
@@ -233,7 +226,13 @@ export class VolumeCalculationService {
                         eb('p.settled_at_epoch', '<', eb.ref('eqp.epoch')),
                         eb.and([
                           eb('p.settled_at_epoch', '=', eb.ref('eqp.epoch')),
-                          eb('p.log_index', '<', eb.ref('eqp.log_index')),
+                          eb('p.tx_position', '<', eb.ref('eqp.tx_position')),
+                        ]),
+                        eb.and([
+                          eb('p.settled_at_epoch', '=', eb.ref('eqp.epoch')),
+                          eb('p.tx_position', '=', eb.ref('eqp.tx_position')),
+                          eb('p.call_index', 'is not', null),
+                          eb('p.call_index', '<', eb.ref('eqp.call_index')),
                         ]),
                       ]);
                     })
@@ -242,7 +241,12 @@ export class VolumeCalculationService {
                         eb('eqp.epoch', '<', eb.ref('qp.epoch')),
                         eb.and([
                           eb('eqp.epoch', '=', eb.ref('qp.epoch')),
-                          eb('eqp.log_index', '<', eb.ref('qp.log_index')),
+                          eb('eqp.tx_position', '<', eb.ref('qp.tx_position')),
+                        ]),
+                        eb.and([
+                          eb('eqp.epoch', '=', eb.ref('qp.epoch')),
+                          eb('eqp.tx_position', '=', eb.ref('qp.tx_position')),
+                          eb('eqp.call_index', '<', eb.ref('qp.call_index')),
                         ]),
                       ]);
                     }),
@@ -257,10 +261,13 @@ export class VolumeCalculationService {
       .select((eb) => {
         const previousPeriodEpoch = sql<
           string | null
-        >`LAG(epoch) OVER (ORDER BY epoch, log_index)`;
-        const previousPeriodLogIndex = sql<
+        >`LAG(epoch) OVER (ORDER BY epoch, tx_position, call_index)`;
+        const previousPeriodTxPos = sql<
           string | null
-        >`LAG(log_index) OVER (ORDER BY epoch, log_index)`;
+        >`LAG(tx_position) OVER (ORDER BY epoch, tx_position, call_index)`;
+        const previousPeriodCallIndex = sql<
+          string | null
+        >`LAG(call_index) OVER (ORDER BY epoch, tx_position, call_index)`;
 
         const volumeAttoFil = eb.fn.coalesce(
           eb.fn.sum('matched_payments.total_amount'),
@@ -278,10 +285,14 @@ export class VolumeCalculationService {
             .coalesce(previousPeriodEpoch, eb.val(activationEpoch))
             .as('start_epoch'),
           eb.fn
-            .coalesce(eb(previousPeriodLogIndex, '+', '1'), eb.val(0))
-            .as('start_log_index'),
+            .coalesce(previousPeriodTxPos, eb.val(0))
+            .as('start_tx_position'),
+          eb.fn
+            .coalesce(eb(previousPeriodCallIndex, '+', '1'), eb.val(0))
+            .as('start_call_index'),
           'epoch as end_epoch',
-          'log_index as end_log_index',
+          'tx_position as end_tx_position',
+          'call_index as end_call_index',
           'qp.lot_atto_usd',
           'qp.claim_atto_fil',
           eb('lot_atto_usd', '/', eb.ref('claim_atto_fil')).as('implied_rate'),
@@ -292,13 +303,15 @@ export class VolumeCalculationService {
       .groupBy([
         'qp.quarter_num',
         'qp.epoch',
-        'qp.log_index',
+        'qp.tx_position',
+        'qp.call_index',
         'qp.claim_tx_hash',
         'qp.lot_atto_usd',
         'qp.claim_atto_fil',
       ])
       .orderBy('qp.epoch')
-      .orderBy('qp.log_index');
+      .orderBy('qp.tx_position')
+      .orderBy('qp.call_index');
 
     const pricingPeriodsResults = await pricePeriodsWithVolumeCTE.execute();
 
@@ -347,9 +360,11 @@ export class VolumeCalculationService {
         return {
           auctionTransactionHash: result.claim_tx_hash,
           startEpoch: BigInt(result.start_epoch),
-          startLogIndex: parseInt(result.start_log_index.toString(), 10),
+          startTxPosition: parseInt(result.start_tx_position.toString(), 10),
+          startCallIndex: parseInt(result.start_call_index.toString(), 10),
           endEpoch: BigInt(result.end_epoch),
-          endLogIndex: parseInt(result.end_log_index.toString(), 10),
+          endTxPosition: parseInt(result.end_tx_position.toString(), 10),
+          endCallIndex: parseInt(result.end_call_index.toString(), 10),
           lotAttoUsd,
           lotUsd,
           claimAttoFil,

@@ -1,9 +1,10 @@
 import StreamWeightActorABI from '@/abis/stream-weight-actor.abi';
 import { type TransactionContext } from '@/db/db';
+import { sortLogs } from '@/lib/utils';
 import { Injectable } from '@nestjs/common';
 import { AbiEvent, getAbiItem } from 'viem';
 import type { LogForEvents } from '../lib/types';
-import { AbstractIndexer, type GetLogsParameters } from './abstract.indexer';
+import { AbstractIndexer, type GetChangesParameters } from './abstract.indexer';
 
 type EventType = (typeof events)[number];
 type Logs = LogForEvents<EventType>[];
@@ -14,24 +15,26 @@ const events = [
 ] as const satisfies AbiEvent[];
 
 @Injectable()
-export class StreamWeightActorIndexer extends AbstractIndexer<EventType> {
+export class StreamWeightActorIndexer extends AbstractIndexer<Logs> {
   public getName(): string {
     return StreamWeightActorIndexer.name;
   }
 
-  protected async getLogs({
+  protected async getChanges({
     client,
     contractAddress,
     fromBlock,
     toBlock,
-  }: GetLogsParameters): Promise<Logs> {
-    return client.getLogs({
+  }: GetChangesParameters): Promise<Logs> {
+    const logs = await client.getLogs({
       address: contractAddress,
       events,
       fromBlock,
       toBlock,
       strict: true,
     });
+
+    return sortLogs(logs);
   }
 
   protected async updateDb(tx: TransactionContext, logs: Logs): Promise<void> {

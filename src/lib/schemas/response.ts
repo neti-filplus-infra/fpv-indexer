@@ -1,146 +1,41 @@
-import { uniq } from 'es-toolkit';
-import { isAddress, isHash } from 'viem';
 import z from 'zod';
-import { isQuarterNumberInput, QuarterNumber } from './quarter-number';
-
-interface PaginationSchemaParameters {
-  maxLimit?: number;
-}
-
-export type SortKey<T extends string> = T extends `${'+' | '-'}${string}`
-  ? T
-  : T | `+${T}` | `-${T}`;
-
-export type SortKeyBase<T extends string> = T extends `+${infer Base}`
-  ? Base
-  : T extends `-${infer Base}`
-    ? Base
-    : T;
+import {
+  isQuarterNumberInput,
+  QuarterNumber,
+  QuarterNumberInput,
+} from '../quarter-number';
+import { bigIntToString, evmAddress, hash } from './common';
 
 // constants
 const exampleOrchestratorAddress = '0xBD669aBd1188F52e82aF114E17aCE2842DCc0Eb4';
 const exampleTransactionHash =
   '0xa56a191348e7b3edc125c1ce9ac1c1cc80f5f7e3404a90af031a96f7bc5263db';
 
-// codecs
-export const inputToBigIntCodec = z.codec(
-  z.union([z.string(), z.number()]),
-  z.bigint(),
-  {
-    decode: (value) => BigInt(value),
-    encode: (value) => value.toString(),
-  },
-);
-
-export const bigIntToStringCodec = z.codec(z.bigint(), z.string(), {
-  decode: (value) => value.toString(),
-  encode: (value) => BigInt(value),
+// common zod types
+const uint = z.bigint().min(0n).pipe(bigIntToString);
+const nonNegativeNumber = z.number().min(0);
+const quarterNumberInput = z.custom<QuarterNumberInput>(isQuarterNumberInput);
+const quarterNumber = z.codec(quarterNumberInput, z.number().int().min(1), {
+  decode: (value) => QuarterNumber.from(value).toNumber(),
+  encode: (value) => QuarterNumber.from(value),
 });
-
-export const quarterNumberInputToQuarterNumberCodec = z.codec(
-  z
-    .union([z.string(), z.number()])
-    .refine(isQuarterNumberInput, { message: 'Invalid quarter number' }),
-  z.instanceof(QuarterNumber),
-  {
-    decode: (value) => QuarterNumber.from(value),
-    encode: (value) => value.toNumber(),
-  },
-);
-
-// common
-export const uintInput = inputToBigIntCodec.pipe(z.bigint().min(0n));
-export const uintOutput = z.bigint().min(0n).pipe(bigIntToStringCodec);
-export const epochInput = uintInput;
-export const epochOutput = uintOutput;
-export const logIndex = z.number().int().min(0);
-export const quarterNumber = z.number().int().min(1);
-export const currencyPositiveValue = z.number().min(0);
-export const evmAddress = z
-  .string()
-  .refine((value) => isAddress(value), { message: 'Invalid EVM address' });
-export const txHash = z
-  .string()
-  .refine((value) => isHash(value), { message: 'Invalid transaction hash' });
-
-// user input
-export const quarterNumberFilterSchema = z.object({
-  quarterNumber: quarterNumberInputToQuarterNumberCodec.meta({
-    description: 'Quarter number',
-  }),
-});
-export type QuarterNumberFilter = z.output<typeof quarterNumberFilterSchema>;
-
-export const orchestratorQuarterlyVolumeParametersSchema = z.object({
-  quarterNumber: quarterNumberInputToQuarterNumberCodec.meta({
-    description: `Quarter number for which postings should be returned. Integer 
-      starting from 1 optionally prefixed with Q eg. Q1 for quarter number 1.`,
-    example: '1',
-  }),
-  serviceOrchestrator: evmAddress.meta({
-    description:
-      'Identifying address of an Orchestrator (not payout wallet address).',
-  }),
-});
-export type OrchestratorQuarterlyVolumeParameters = z.output<
-  typeof orchestratorQuarterlyVolumeParametersSchema
->;
-
-export const gateTargetParametersSchema = z.object({
-  atEpoch: epochInput.optional().meta({
-    description:
-      'Provide to fetch state as of this epoch. Leave empty for most recent epoch.',
-  }),
-});
-export type GateTargetParameters = z.output<typeof gateTargetParametersSchema>;
-
-export const paymentsQuerySchema = z
-  .object({
-    serviceOrchestrator: z.string().optional().meta({
-      description: `Service Orchestrator address to filter payments by`,
-    }),
-    fromEpoch: epochInput.optional().meta({
-      description:
-        'Return payments settled at or after this epoch, or, in the case of FIL payments, priced at or after this epoch (inclusive).',
-    }),
-    toEpoch: epochInput.optional().meta({
-      description:
-        'Return payments settled at or before this epoch, or, in the case of FIL payments, priced at or before this epoch (inclusive).',
-    }),
-    countsTowardsVolume: z
-      .stringbool()
-      .optional()
-      .meta({
-        description: `Pass truthy value to return only payments that count 
-          towards volume, falsy for reverse or omit for all. Payment counts 
-          towards volume only if following were true at settlement time:\n
-            - Filecoin Pay contract they were made on was whitelisted\n
-            - Token they were made in was whitelisted\n
-            - (payer, operator) pair was bound to a Service Orchestrator\n`,
-      }),
-  })
-  .extend(createSortingSchema(['epoch'] as const, '-epoch').shape)
-  .extend(createPaginationSchema({ maxLimit: 100 }).shape);
-export type PaymentsQuery = z.output<typeof paymentsQuerySchema>;
-
-// server output
-const paginationMetadataSchema = z.object({
+const paginationMetadata = z.object({
   pagination: z.object({
     page: z.number().int().min(1),
-    pagesCount: z.bigint().min(1n).pipe(bigIntToStringCodec),
-    totalCount: uintOutput,
+    pagesCount: z.bigint().min(1n).pipe(bigIntToString),
+    totalCount: uint,
   }),
 });
-export type PaginationMetadata = z.input<typeof paginationMetadataSchema>;
 
-export const indexerStatusSchema = z.object({
+// schemas
+export const indexerStatus = z.object({
   version: z.string().meta({
     description: 'Instance version',
   }),
   chainId: z.number().meta({
     description: 'Chain ID',
   }),
-  indexedUpTo: epochOutput.meta({
+  indexedUpTo: uint.meta({
     description:
       'Lowest epoch number any of the indexed contract is indexed to',
   }),
@@ -153,32 +48,32 @@ export const indexerStatusSchema = z.object({
       address: evmAddress.meta({
         description: 'Address of an indexed contract',
       }),
-      indexedUpTo: epochOutput.meta({
+      indexedUpTo: uint.meta({
         description: 'This contract is indexed up to this epoch',
       }),
     }),
   ),
 });
-export type IndexerStatus = z.input<typeof indexerStatusSchema>;
+export type IndexerStatus = z.input<typeof indexerStatus>;
 
-export const blockNumberResponseSchema = z.object({
-  blockNumber: uintOutput.meta({
+export const blockNumberResponse = z.object({
+  blockNumber: uint.meta({
     description: 'Current block number returned by the RPC indexer is using.',
     example: 7_654_321n.toString(),
   }),
 });
-export type BlockNumberResponse = z.input<typeof blockNumberResponseSchema>;
+export type BlockNumberResponse = z.input<typeof blockNumberResponse>;
 
-export const quarterSchema = z.object({
+export const quarter = z.object({
   q: quarterNumber.meta({
     description: 'Quarter number. Integer starting from 1.',
     example: 1,
   }),
-  startEpoch: epochOutput.meta({
+  startEpoch: uint.meta({
     description: 'Starting epoch of a quarter, inclusive.',
     example: 100n.toString(),
   }),
-  endEpoch: epochOutput.meta({
+  endEpoch: uint.meta({
     description: 'Ending epoch of a quarter, inclusive.',
     example: 110n.toString(),
   }),
@@ -186,31 +81,31 @@ export const quarterSchema = z.object({
     description: `Flag telling if quarter completed or not (it's past it's end epoch).`,
   }),
 });
-export type Quarter = z.input<typeof quarterSchema>;
+export type Quarter = z.input<typeof quarter>;
 
-export const quarterParametersSchema = z.object({
-  minLotAttoUsd: uintOutput.meta({
+export const quarterParameters = z.object({
+  minLotAttoUsd: uint.meta({
     description: `Minimum lot for Filecoin Pay auction to qualify as a pricing 
       print for FIL volume, in attoUSD, calculated as described in FIP-0118.`,
     example: '500000000000000000',
   }),
-  minLotUsd: currencyPositiveValue.meta({
+  minLotUsd: nonNegativeNumber.meta({
     description: `Approximation of "minLotAttoUsd" in USD.`,
     example: 0.5,
   }),
-  minLotFloorAttoUsd: uintOutput.meta({
+  minLotFloorAttoUsd: uint.meta({
     description: `Minimum lot floor in atto-USD.`,
     example: '500000000000000000',
   }),
-  minLotFloorUsd: currencyPositiveValue.meta({
+  minLotFloorUsd: nonNegativeNumber.meta({
     description: `Approximation of "minLotFloorAttoUsd" in USD.`,
     example: 0.5,
   }),
-  minLotAlphaNumerator: uintOutput.meta({
+  minLotAlphaNumerator: uint.meta({
     description: `Numerator part of MIN_LOT_ALPHA`,
     example: '1',
   }),
-  minLotAlphaDenominator: uintOutput.meta({
+  minLotAlphaDenominator: uint.meta({
     description: `Denominator part of MIN_LOT_ALPHA`,
     example: '400',
   }),
@@ -222,13 +117,18 @@ export const quarterParametersSchema = z.object({
         "minLotAlphaDenominator".`,
       example: 0.0025,
     }),
-  priceBandBps: uintOutput.meta({
+  priceBandBps: uint.meta({
     description: 'Price band in basis points.',
     example: '3000',
   }),
   priceBand: z.number().min(0).meta({
     description: `Approximate result of dividing "priceBandBps" by 10000.`,
     example: 0.3,
+  }),
+  registrationCutoff: uint.meta({
+    description: `Registration cutoff in epochs. Pair registration in the last
+      cutoff of a quarter applies from the start of next quarter.`,
+    example: '20160',
   }),
   admittedStablecoins: z.array(evmAddress).meta({
     description: 'List of stablecoins addresses admitted in given quarter.',
@@ -251,183 +151,190 @@ export const quarterParametersSchema = z.object({
         Used in calculating "minLotAttoUsd".`,
       example: 12,
     }),
-  previousQuarterBoundVolumeAttoUsd: uintOutput.meta({
+  previousQuarterBoundVolumeAttoUsd: uint.meta({
     description: `Total volume posted by Orchestrators in previous quarter. 
       Used in calculating "minLotAttoUsd".`,
     example: 3_200_000_000_000_000_000_000n.toString(),
   }),
-  previousQuarterBoundVolumeUsd: currencyPositiveValue.meta({
+  previousQuarterBoundVolumeUsd: nonNegativeNumber.meta({
     description: `Approximation of "previousQuarterBoundVolumeAttoUsd" in USD.`,
     example: 3200,
   }),
 });
-export type QuarterParameters = z.input<typeof quarterParametersSchema>;
+export type QuarterParameters = z.input<typeof quarterParameters>;
 
-export const orchestratorAdmissionPeriodSchema = z.object({
+export const orchestratorAdmissionPeriod = z.object({
   wallet: evmAddress.meta({
     description:
       'Wallet address of Service Orchestrator during that admittance period.',
     example: exampleOrchestratorAddress,
   }),
-  admissionEpoch: epochOutput.meta({
+  admissionEpoch: uint.meta({
     description: 'Admission epoch.',
     example: 1234n,
   }),
-  admissionLogIndex: logIndex.meta({
+  admissionLogIndex: nonNegativeNumber.meta({
     description: 'Admission log index.',
   }),
-  admissionTxHash: txHash.meta({
+  admissionTxHash: hash.meta({
     description: 'Hash of transaction that admitted a Service Orchestrator.',
     example: exampleTransactionHash,
   }),
-  removalEpoch: epochOutput.nullable().meta({
+  removalEpoch: uint.nullable().meta({
     description: 'Epoch at which admission ended. Null for ongoing admissions.',
     example: 4321n.toString(),
   }),
-  removalLogIndex: logIndex.nullable().meta({
+  removalLogIndex: nonNegativeNumber.nullable().meta({
     description:
       'Log index at which admission ended. Null for ongoing admissions.',
     example: null,
   }),
-  removalTxHash: txHash.nullable().meta({
+  removalTxHash: hash.nullable().meta({
     description:
       'Hash of transaction that ended a Service Orchestrator admission. Null for ongoing admissions',
     example: exampleTransactionHash,
   }),
 });
 export type OrchestratorAdmissionPeriod = z.input<
-  typeof orchestratorAdmissionPeriodSchema
+  typeof orchestratorAdmissionPeriod
 >;
 
-export const serviceOrchestratorSchema = z.object({
+export const serviceOrchestrator = z.object({
   id: evmAddress.meta({
     description: 'Identyfing address of Service Orchestrator.',
     example: exampleOrchestratorAddress,
   }),
-  admissionPeriods: z.array(orchestratorAdmissionPeriodSchema).meta({
+  admissionPeriods: z.array(orchestratorAdmissionPeriod).meta({
     description: 'Periods at which Service Orchestrator was admitted.',
   }),
 });
-export type ServiceOrchestrator = z.input<typeof serviceOrchestratorSchema>;
+export type ServiceOrchestrator = z.input<typeof serviceOrchestrator>;
 
-export const serviceOrchestratorsListSchema = z.array(
-  serviceOrchestratorSchema,
-);
-export type ServiceOrchestratorsList = z.input<
-  typeof serviceOrchestratorsListSchema
->;
+export const serviceOrchestratorsList = z.array(serviceOrchestrator);
+export type ServiceOrchestratorsList = z.input<typeof serviceOrchestratorsList>;
 
-export const pricingPeriodSchema = z.object({
-  auctionTransactionHash: txHash.meta({
+export const pricingPeriod = z.object({
+  auctionTransactionHash: hash.meta({
     description: 'Hash of transaction that created this pricing period.',
   }),
-  startEpoch: epochOutput.meta({
+  startEpoch: uint.meta({
     description: 'Epoch from which pricing period applies (inclusive).',
     example: '110',
   }),
-  startLogIndex: logIndex.meta({
-    description: 'Log index from which pricing period applies (inclusive).',
+  startTxPosition: nonNegativeNumber.meta({
+    description:
+      'Transaction position within a tipset from which pricing period applies (inclusive).',
     example: 0,
   }),
-  endEpoch: epochOutput.meta({
+  startCallIndex: nonNegativeNumber.meta({
+    description: `Call index within a transaction from which pricing period
+      applies (inclusive).`,
+    example: 0,
+  }),
+  endEpoch: uint.meta({
     description: `Epoch to which pricing period applies (inclusive). Also epoch 
       at which fee auction that created this pricing period occurred.`,
     example: '120',
   }),
-  endLogIndex: logIndex.meta({
-    description: `Log index to which pricing period applies (inclusive). Also  
-      log index at which fee auction that created this pricing period occurred.`,
+  endTxPosition: nonNegativeNumber.meta({
+    description: `Transaction position within a tipset to which pricing period
+      applies (inclusive). Also transaction position at which fee auction that
+      created this pricing period occurred.`,
     example: 10,
   }),
-  lotAttoUsd: uintOutput.meta({
+  endCallIndex: nonNegativeNumber.meta({
+    description: `Call indexed within a transaction to which this pricing period
+      applies. Also a position of a trace that created the pricing period,
+      within it's transaction.`,
+    example: 10,
+  }),
+  lotAttoUsd: uint.meta({
     description: `Amount of fees auctioned in auction that created this pricing 
       period, in atto-USD.`,
     example: 432_100_000_000_000_000_000n.toString(),
   }),
-  lotUsd: currencyPositiveValue.meta({
+  lotUsd: nonNegativeNumber.meta({
     description: 'Approximation of "lotAttoUsd" in USD.',
     example: 432.1,
   }),
-  claimAttoFil: uintOutput.meta({
+  claimAttoFil: uint.meta({
     description: `Amount of FIL burned in auction that created this pricing 
       period, in atto-FIL.`,
     example: 123_400_000_000_000_000_000n.toString(),
   }),
-  claimFil: currencyPositiveValue.meta({
+  claimFil: nonNegativeNumber.meta({
     description: 'Approximation of "claimAttoFil" in FIL.',
     example: 1.23,
   }),
   impliedRate: z.number().min(0),
 });
-export type PricingPeriod = z.input<typeof pricingPeriodSchema>;
+export type PricingPeriod = z.input<typeof pricingPeriod>;
 
-export const pricingPeriodWithVolumeSchema = pricingPeriodSchema.extend({
-  volumeAttoFil: uintOutput.meta({
+export const pricingPeriodWithVolume = pricingPeriod.extend({
+  volumeAttoFil: uint.meta({
     description: `Amount of Orchestrator's FIL volume priced by this pricing 
       period, in atto-FIL.`,
     example: 123_400_000_000_000_000_000n.toString(),
   }),
-  volumeFil: currencyPositiveValue.meta({
+  volumeFil: nonNegativeNumber.meta({
     description: `Approximation of "volumeAttoFil" in FIL.`,
     example: 123.4,
   }),
-  volumeAttoUsd: uintOutput.meta({
+  volumeAttoUsd: uint.meta({
     description: `Total FIL volume of Orchestrator accrued in given pricing 
       period, converted to atto-USD and floored.`,
     example: 432_100_000_000_000_000_000n.toString(),
   }),
-  volumeUsd: currencyPositiveValue.meta({
+  volumeUsd: nonNegativeNumber.meta({
     description: `Approximation of "volumeAttoUsd" in USD.`,
     example: 432.1,
   }),
 });
-export type PricingPeriodWithVolume = z.input<
-  typeof pricingPeriodWithVolumeSchema
->;
+export type PricingPeriodWithVolume = z.input<typeof pricingPeriodWithVolume>;
 
-export const quarterlyVolumeSchema = z.object({
-  quarter: quarterSchema.meta({
+export const quarterlyVolume = z.object({
+  quarter: quarter.meta({
     description: `Quarter attributed to volume reported here.`,
   }),
-  volumeAttoUsd: uintOutput.meta({
+  volumeAttoUsd: uint.meta({
     description: `Orchestrator's total volume in given quarter. Sum of total 
       stablecoin volume and total FIL volume. This is the figure Orchestrator 
       should post after quarter end.`,
     example: 200_000_000_000_000_000_000n.toString(),
   }),
-  volumeUsd: currencyPositiveValue.meta({
+  volumeUsd: nonNegativeNumber.meta({
     description: `Approximation of "volumeAttoUsd" in USD.`,
     example: 200,
   }),
-  filVolumeAttoUsd: uintOutput.meta({
+  filVolumeAttoUsd: uint.meta({
     description: `Orchestrator's total FIL volume in given quarter. Sum of FIL 
       volume converted to USD for each pricing period.`,
     example: 100_000_000_000_000_000_000n.toString(),
   }),
-  filVolumeUsd: currencyPositiveValue.meta({
+  filVolumeUsd: nonNegativeNumber.meta({
     description: `Approximation of "filVolumeAttoUsd" in USD.`,
     example: 100,
   }),
-  stablecoinVolumeAttoUsd: uintOutput.meta({
+  stablecoinVolumeAttoUsd: uint.meta({
     description: `Orchestrator's total stablecoin volume in given quarter.`,
     example: 100_000_000_000_000_000_000n.toString(),
   }),
-  stablecoinVolumeUsd: currencyPositiveValue.meta({
+  stablecoinVolumeUsd: nonNegativeNumber.meta({
     description: `Approximation of "stablecoinVolumeAttoUsd" in USD.`,
     example: 100,
   }),
-  pricingPeriods: z.array(pricingPeriodWithVolumeSchema).meta({
+  pricingPeriods: z.array(pricingPeriodWithVolume).meta({
     description: `List of pricing periods that priced FIL volume during given quarter.`,
   }),
 });
-export type QuarterlyVolume = z.input<typeof quarterlyVolumeSchema>;
+export type QuarterlyVolume = z.input<typeof quarterlyVolume>;
 
-export const volumePostingOrCorrectionSchema = z.object({
+export const volumePostingOrCorrection = z.object({
   serviceOrchestrator: evmAddress.meta({
     description: `Identifying address of Service Orchestrator.`,
     example: exampleOrchestratorAddress,
   }),
-  volumeAttoUsd: uintOutput.meta({
+  volumeAttoUsd: uint.meta({
     description: `Volume declared or corrected in atto-USD.`,
     example: 65_432_100_000_000_000_000_000n.toString(),
   }),
@@ -436,35 +343,33 @@ export const volumePostingOrCorrectionSchema = z.object({
       "VolumeCorrected" events).`,
     example: false,
   }),
-  postingEpoch: epochOutput.meta({
+  postingEpoch: uint.meta({
     description: `Epoch at posting or correction was made for given quarter.`,
     example: '111',
   }),
-  postingTxHash: txHash.meta({
+  postingTxHash: hash.meta({
     description: `Hash of transaction responsible for posting or correction.`,
     example: exampleTransactionHash,
   }),
 });
 export type VolumePostingOrCorrection = z.input<
-  typeof volumePostingOrCorrectionSchema
+  typeof volumePostingOrCorrection
 >;
 
-export const quarterlyVolumePostingsSchema = z.object({
+export const quarterlyVolumePostings = z.object({
   quarterNumber: quarterNumber.meta({
     description: 'Quarter number.',
   }),
-  aggregatedVolumeAttoUsd: uintOutput.meta({
+  aggregatedVolumeAttoUsd: uint.meta({
     description: 'Sum of all orchestrators final postings.',
   }),
-  postings: z.array(volumePostingOrCorrectionSchema).meta({
+  postings: z.array(volumePostingOrCorrection).meta({
     description: 'Orchestrators final postings list in given quarter.',
   }),
 });
-export type QuarterlyVolumePostings = z.input<
-  typeof quarterlyVolumePostingsSchema
->;
+export type QuarterlyVolumePostings = z.input<typeof quarterlyVolumePostings>;
 
-export const orchestratorQuarterlyVolumePostingSchema = z.object({
+export const orchestratorQuarterlyVolumePosting = z.object({
   serviceOrchestrator: evmAddress.meta({
     description: `Identifying address of Service Orchestrator.`,
     example: exampleOrchestratorAddress,
@@ -473,7 +378,7 @@ export const orchestratorQuarterlyVolumePostingSchema = z.object({
     description: `Quarter number attributed to the volume posting.`,
     example: 1,
   }),
-  volumeAttoUsd: uintOutput.nullable().meta({
+  volumeAttoUsd: uint.nullable().meta({
     description: `Final volume after corrections in atto-USD. Null if no volume 
       was posted or if volume was corrected to 0.`,
     example: 65_432_100_000_000_000_000_000n.toString(),
@@ -488,47 +393,47 @@ export const orchestratorQuarterlyVolumePostingSchema = z.object({
       posting window.`,
     example: false,
   }),
-  postingEpoch: epochOutput.nullable().meta({
+  postingEpoch: uint.nullable().meta({
     description: `Epoch at which final volume after corrections was decided. 
       Null if "volumeAttoUsd" is null.`,
     example: '111',
   }),
-  postingTxHash: txHash.nullable().meta({
+  postingTxHash: hash.nullable().meta({
     description: `Hash of transaction that decided the final volume. Null if 
       "volumeAttoUsd" is null.`,
     example: exampleTransactionHash,
   }),
-  postings: z.array(volumePostingOrCorrectionSchema).meta({
+  postings: z.array(volumePostingOrCorrection).meta({
     description: `List of all Orchestrator postings and corections made.`,
   }),
 });
 export type OrchestratorQuarterlyVolumePosting = z.input<
-  typeof orchestratorQuarterlyVolumePostingSchema
+  typeof orchestratorQuarterlyVolumePosting
 >;
 
-export const gateTargetSchema = z.object({
-  atEpoch: epochOutput.nullable().meta({
+export const gateTarget = z.object({
+  atEpoch: uint.nullable().meta({
     description: 'State as of epoch. Null means most recent epoch.',
     example: 4321n.toString(),
   }),
-  lastCheckEpoch: epochOutput.nullable().meta({
+  lastCheckEpoch: uint.nullable().meta({
     description:
       'Epoch at which last check occurred. Null if no checks occurred.',
     example: 1234n.toString(),
   }),
   capReached: z.boolean(),
-  targetAttoUsd: uintOutput.meta({
+  targetAttoUsd: uint.meta({
     description: 'Calculated gate target in atto USD.',
     example: 3_500_000_000_000_000_000_000n.toString(),
   }),
-  targetUsd: currencyPositiveValue.meta({
+  targetUsd: nonNegativeNumber.meta({
     description: 'Approximated gate target in USD.',
     example: 3_500,
   }),
 });
-export type GateTarget = z.input<typeof gateTargetSchema>;
+export type GateTarget = z.input<typeof gateTarget>;
 
-export const paginatedPaymentsListSchema = z
+export const paginatedPaymentsList = z
   .object({
     data: z.array(
       z.object({
@@ -536,7 +441,7 @@ export const paginatedPaymentsListSchema = z
           description:
             'Address of Filecoin Pay contract the payment was made on.',
         }),
-        epoch: epochOutput.meta({
+        epoch: uint.meta({
           description: 'Epoch at which the payment was made.',
         }),
         logIndex: z.number().int().min(0).meta({
@@ -545,7 +450,7 @@ export const paginatedPaymentsListSchema = z
         transactionHash: z.string().nonempty().meta({
           description: 'Hash of the transaction containing the payment.',
         }),
-        railId: z.bigint().pipe(bigIntToStringCodec).meta({
+        railId: uint.meta({
           description: 'ID of Filecoin Pay rail the payment was made on.',
         }),
         payer: z.string().nonempty().meta({
@@ -568,29 +473,29 @@ export const paginatedPaymentsListSchema = z
         tokenSymbol: z.string().nonempty().meta({
           description: 'Symbol of the token the payment was made in.',
         }),
-        totalAmountBaseUnits: uintOutput.meta({
+        totalAmountBaseUnits: uint.meta({
           description: 'Total payment amount in underlying token base units.',
         }),
-        totalAmount: currencyPositiveValue.meta({
+        totalAmount: nonNegativeNumber.meta({
           description: 'totalAmountBaseUnits / 10^tokenDecimals',
         }),
-        netPayeeAmountBaseUnits: uintOutput.meta({
+        netPayeeAmountBaseUnits: uint.meta({
           description:
             'Net payee amount (amount payee receives after fees and commissions) in underlying token base units.',
         }),
-        netPayeeAmount: currencyPositiveValue.meta({
+        netPayeeAmount: nonNegativeNumber.meta({
           description: 'netPayeeAmountBaseUnits / 10^tokenDecimals',
         }),
-        networkFeeBaseUnits: uintOutput.meta({
+        networkFeeBaseUnits: uint.meta({
           description: 'Network fee in underlying token base units.',
         }),
-        networkFee: currencyPositiveValue.meta({
+        networkFee: nonNegativeNumber.meta({
           description: 'networkFeeBaseUnits / 10^tokenDecimals',
         }),
-        operatorComissionBaseUnits: uintOutput.meta({
+        operatorComissionBaseUnits: uint.meta({
           description: 'Operator commission in underlying token base units.',
         }),
-        operatorComission: currencyPositiveValue.meta({
+        operatorComission: nonNegativeNumber.meta({
           description: 'operatorComission / 10^tokenDecimals',
         }),
         serviceOrchestrator: z.string().nullable().meta({
@@ -605,91 +510,17 @@ export const paginatedPaymentsListSchema = z
           description:
             'Flag telling if the address of the token the payment was made in was whitelisted in the quarter the payment was made in. Always true for FIL payments.',
         }),
-        quarter: quarterSchema.nullable().meta({
+        quarter: quarter.nullable().meta({
           description:
             'Quarter the payment was made in. Null if made before the activation epoch.',
         }),
-        pricingPeriod: pricingPeriodSchema.nullable().meta({
+        pricingPeriod: pricingPeriod.nullable().meta({
           description:
             'Price period that prices this payment. Null if no qualifying price was found for the payment or if the payment was made in a token other than FIL.',
         }),
       }),
     ),
   })
-  .extend(paginationMetadataSchema.shape);
+  .extend(paginationMetadata.shape);
 
-export type PaginatedPaymentsList = z.input<typeof paginatedPaymentsListSchema>;
-
-// utils
-export function sortKeyBase<T extends string>(
-  input: T | SortKey<T>,
-): SortKeyBase<T> {
-  const base =
-    input.startsWith('-') || input.startsWith('+') ? input.slice(1) : input;
-
-  return base as SortKeyBase<T>;
-}
-
-function fieldsToSortKeys<T extends string>(input: [T, ...T[]]): SortKey<T>[] {
-  const options = input.flatMap((key) => {
-    const base = sortKeyBase(key);
-    return [base, `-${base}`, `+${base}`];
-  });
-
-  return uniq(options) as [SortKey<T>, ...SortKey<T>[]];
-}
-
-function createSortingSchema<T extends string>(
-  allowedFields: [T, ...T[]],
-  defaultSort: SortKey<T>,
-) {
-  const allowedKeys = fieldsToSortKeys(allowedFields);
-  const exampleField =
-    allowedFields[0].startsWith('-') || allowedFields[0].startsWith('+')
-      ? allowedFields[0].slice(1)
-      : allowedFields[0];
-
-  return z.object({
-    sort: z
-      .preprocess(
-        (value) => {
-          if (typeof value === 'string') {
-            return value.split(',').map((field) => field.trim());
-          }
-
-          return value;
-        },
-        z.array(z.enum(allowedKeys)).min(1).default([defaultSort]),
-      )
-      .meta({
-        description: `Sort order. For multiple fields sorting pass array or 
-          comma separated string. Prefix with "-" for descending sort.`,
-        example: `-${exampleField}`,
-        default: [defaultSort],
-      }),
-  });
-}
-
-function createPaginationSchema({ maxLimit }: PaginationSchemaParameters = {}) {
-  let limitSchema = z.coerce.number().int().min(1);
-
-  if (maxLimit !== undefined) {
-    if (!limitSchema.safeParse(maxLimit).success) {
-      throw new TypeError('maxLimit must be an integer of at least 1');
-    }
-
-    limitSchema = limitSchema.max(maxLimit);
-  }
-
-  return z.object({
-    page: z.coerce.number().int().min(1).default(1).meta({
-      title: `Page number. Integer starting from 1.`,
-      description: `Page number. Integer starting from 1.`,
-      default: 1,
-      example: 1,
-    }),
-    limit: limitSchema.optional().meta({
-      description: `Number of items per page. Integer starting. Minimum 1.`,
-    }),
-  });
-}
+export type PaginatedPaymentsList = z.input<typeof paginatedPaymentsList>;

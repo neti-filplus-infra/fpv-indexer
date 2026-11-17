@@ -1,6 +1,6 @@
 {
   "name": "fpv-indexer",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "",
   "author": "",
   "private": true,
@@ -35,7 +35,7 @@
     "@nestjs/config": "^12.0.0",
     "@nestjs/core": "^12.0.0",
     "@nestjs/observe": "^0.1.8",
-    "@nestjs/platform-express": "^12.0.0",
+    "@nestjs/platform-express": "^12.5.0",
     "@nestjs/schedule": "^12.0.2",
     "@nestjs/swagger": "^12.0.1",
     "axios": "^1.20.0",
@@ -47,20 +47,20 @@
     "es-toolkit": "^1.52.0",
     "kysely": "^0.29.4",
     "pg": "^8.22.0",
-    "prisma": "^7.9.1",
+    "prisma": "^7.10.1",
     "prisma-kysely": "^3.1.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "semver": "^7.8.5",
     "viem": "^2.55.11",
-    "zod": "^4.4.3"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.3",
     "@commitlint/config-conventional": "^21.2.3",
     "@eslint/eslintrc": "^3.2.0",
     "@eslint/js": "^9.18.0",
-    "@nestjs/cli": "^12.0.0",
+    "@nestjs/cli": "^12.0.12",
     "@nestjs/schematics": "^12.0.0",
     "@nestjs/testing": "^12.0.0",
     "@types/express": "^5.0.0",
@@ -81,8 +81,8 @@
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.20.0",
+    "typescript-eslint": "^8.72.2",
     "vite-tsconfig-paths": "^6.1.1",
-    "vitest": "^5.0.0"
+    "vitest": "^5.1.0"
   }
 }

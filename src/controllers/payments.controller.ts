@@ -1,6 +1,7 @@
 import {
-  paginatedPaymentsListSchema,
-  paymentsQuerySchema,
+  type PaginatedPaymentsList,
+  paginatedPaymentsList,
+  paymentsQuery,
   type PaymentsQuery,
 } from '@/lib/schemas';
 import { PaymentsService } from '@/services/payments.service';
@@ -12,14 +13,14 @@ export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}
 
   @Get('/')
-  @SerializeOptions({ schema: paginatedPaymentsListSchema })
+  @SerializeOptions({ schema: paginatedPaymentsList })
   @ApiOkResponse({
     description: 'Paginated payments list.',
-    standardSchema: paginatedPaymentsListSchema,
+    standardSchema: paginatedPaymentsList,
   })
   public getPayments(
-    @Query({ schema: paymentsQuerySchema }) query: PaymentsQuery,
-  ) {
+    @Query({ schema: paymentsQuery }) query: PaymentsQuery,
+  ): Promise<PaginatedPaymentsList> {
     return this.paymentsService.getPaymentsPaginated(query);
   }
 }

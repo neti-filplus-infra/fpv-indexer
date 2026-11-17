@@ -8,29 +8,30 @@ import type {
   ConfigShape,
   FilecoinPublicClient,
   IndexerRunParameters,
-  LogForEvents,
 } from '@/lib/types';
-import { compareNullableNumber, maxBigInt, numericToBigInt } from '@/lib/utils';
+import { maxBigInt, numericToBigInt } from '@/lib/utils';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { AbiEvent, Address, Log } from 'viem';
+import type { Address } from 'viem';
 
-export interface GetLogsParameters {
+export interface GetChangesParameters {
+  archiveClient: FilecoinPublicClient;
   client: FilecoinPublicClient;
   contractAddress: Address;
   fromBlock: bigint;
+  recentClient: FilecoinPublicClient;
   toBlock: bigint;
 }
 
 @Injectable()
-export abstract class AbstractIndexer<EventType extends AbiEvent> {
+export abstract class AbstractIndexer<C = unknown> {
   public abstract getName(): string;
-  protected abstract getLogs(
-    parameters: GetLogsParameters,
-  ): Promise<LogForEvents<EventType>[]>;
+  protected abstract getChanges(
+    parameters: GetChangesParameters,
+  ): Promise<C> | C;
   protected abstract updateDb(
     txContext: TransactionContext,
-    logs: LogForEvents<EventType>[],
+    changes: C,
   ): Promise<void>;
   protected logger: Logger;
 
@@ -121,19 +122,20 @@ export abstract class AbstractIndexer<EventType extends AbiEvent> {
     }
 
     logger.log(
-      `Fetching logs in block range [${fromBlock.toString()}-${toBlock.toString()}] using ${shouldUseArchiveNode ? '"Archive Node"' : '"Recent Node"'}`,
+      `Fetching changes in block range [${fromBlock.toString()}-${toBlock.toString()}] using ${shouldUseArchiveNode ? '"Archive Node"' : '"Recent Node"'}`,
     );
 
-    const logs = await this.getLogs({
+    const changes = await this.getChanges({
+      archiveClient: this.archiveNodeClient,
+      recentClient: this.recentNodeClient,
       client: selectedNode,
       contractAddress,
       fromBlock,
       toBlock,
     });
-    const logsSorted = this.sortLogs(logs);
 
     await db.transaction().execute(async (tx) => {
-      await this.updateDb(tx, logsSorted);
+      await this.updateDb(tx, changes);
 
       await tx
         .insertInto('indexer_state')
@@ -153,38 +155,15 @@ export abstract class AbstractIndexer<EventType extends AbiEvent> {
         .executeTakeFirst();
     });
 
-    const logsCount = logs.length;
     const keepRunning = maxToBlock !== toBlock;
 
     logger.log(
-      keepRunning
-        ? `Indexed ${logsCount} logs up to block ${toBlock.toString()}. Scheduling another run.`
-        : `Finished indexing ${logsCount} logs.`,
+      `Indexed changes up to block ${toBlock.toString()}. ${keepRunning ? 'Scheduling another run.' : 'Indexer up to date.'}.`,
     );
 
     // keep indexing if we havent synced up
     if (keepRunning) {
       await this.run(parameters);
     }
-  }
-
-  private sortLogs<T extends Log>(logs: T[]): T[] {
-    return [...logs].sort((a, b) => {
-      const blockOrder = compareNullableNumber(
-        a.blockNumber,
-        b.blockNumber,
-        'asc',
-      );
-      if (blockOrder !== 0) return blockOrder;
-
-      const transactionOrder = compareNullableNumber(
-        a.transactionIndex,
-        b.transactionIndex,
-        'asc',
-      );
-      if (transactionOrder !== 0) return transactionOrder;
-
-      return compareNullableNumber(a.logIndex, b.logIndex, 'asc');
-    });
   }
 }

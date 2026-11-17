@@ -2,10 +2,12 @@ import FilecoinPayV1ABI from '@/abis/filecoin-pay-v1.abi';
 import { TransactionContext } from '@/db/db';
 import { DB } from '@/db/types';
 import type { LogForEvents } from '@/lib/types';
+import { sortLogs } from '@/lib/utils';
 import { Injectable } from '@nestjs/common';
 import { InsertObject } from 'kysely';
 import { getAbiItem, type AbiEvent } from 'viem';
-import { AbstractIndexer, type GetLogsParameters } from './abstract.indexer';
+import { AbstractIndexer, type GetChangesParameters } from './abstract.indexer';
+import { chunk } from 'es-toolkit';
 
 type EventType = (typeof events)[number];
 type Logs = LogForEvents<EventType>[];
@@ -17,37 +19,43 @@ const events = [
 ] as const satisfies AbiEvent[];
 
 @Injectable()
-export class FilecoinPayV1Indexer extends AbstractIndexer<EventType> {
+export class FilecoinPayV1Indexer extends AbstractIndexer<Logs> {
   public getName(): string {
     return FilecoinPayV1Indexer.name;
   }
 
-  protected getLogs({
+  protected async getChanges({
     client,
     contractAddress,
     fromBlock,
     toBlock,
-  }: GetLogsParameters): Promise<Logs> {
-    return client.getLogs({
+  }: GetChangesParameters): Promise<Logs> {
+    const logs = await client.getLogs({
       address: contractAddress,
       events,
       fromBlock,
       toBlock,
       strict: true,
     });
+
+    return sortLogs(logs);
   }
 
   protected async updateDb(tx: TransactionContext, logs: Logs): Promise<void> {
     const rails = this.getRailsInputs(logs);
 
     if (rails.length > 0) {
-      await tx.insertInto('filecoin_pay_rail').values(rails).execute();
+      for (const part of chunk(rails, 1000)) {
+        await tx.insertInto('filecoin_pay_rail').values(part).execute();
+      }
     }
 
     const payments = this.getPaymentsInputs(logs);
 
     if (payments.length > 0) {
-      await tx.insertInto('filecoin_pay_payment').values(payments).execute();
+      for (const part of chunk(payments, 1000)) {
+        await tx.insertInto('filecoin_pay_payment').values(part).execute();
+      }
     }
   }
 
@@ -96,6 +104,7 @@ export class FilecoinPayV1Indexer extends AbstractIndexer<EventType> {
         return {
           filecoin_pay_contract_address: log.address.toLowerCase(),
           tx_hash: log.transactionHash.toLowerCase(),
+          tx_position: log.transactionIndex,
           log_index: log.logIndex,
           rail_id: log.args.railId.toString(),
           total_amount: totalAmount.toString(),

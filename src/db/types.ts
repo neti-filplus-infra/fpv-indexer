@@ -25,8 +25,9 @@ export type filecoin_pay_fee_auction = {
     id: Generated<string>;
     filecoin_pay_contract_address: string;
     tx_hash: string;
-    log_index: number;
-    amount_actual: string;
+    tx_position: number;
+    call_index: number;
+    amount_requested: string;
     fil_burned: string;
     token_address: string;
     auctioned_at_epoch: string;
@@ -35,7 +36,9 @@ export type filecoin_pay_payment = {
     id: Generated<string>;
     filecoin_pay_contract_address: string;
     tx_hash: string;
+    tx_position: number;
     log_index: number;
+    call_index: number | null;
     net_payee_amount: string;
     network_fee: string;
     one_time: boolean;
@@ -64,7 +67,8 @@ export type indexer_state = {
 export type qualified_price_periods_mv = {
     quarter_num: number;
     epoch: string;
-    log_index: number;
+    tx_position: number;
+    call_index: number;
     lot_atto_usd: string;
     claim_atto_fil: string;
     claim_tx_hash: string;
@@ -115,8 +119,10 @@ export type service_pair = {
     to_epoch: string | null;
     to_log_index: number | null;
     binding_epoch: string;
+    binding_log_index: number;
     binding_tx_hash: string;
     unbinding_epoch: string | null;
+    unbinding_log_index: number | null;
     unbinding_tx_hash: string | null;
 };
 export type service_rewards_actor_parameter = {

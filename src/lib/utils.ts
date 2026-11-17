@@ -1,11 +1,12 @@
 import { BigNumber } from 'bignumber.js';
-import { createPublicClient, extractChain, http, rpcSchema } from 'viem';
+import { createPublicClient, extractChain, http, Log, rpcSchema } from 'viem';
 import { prettifyError } from 'zod';
 import { CONFIG_SCHEMA, SUPPORTED_CHAINS } from './constants';
 import type {
   ConfigShape,
   FilecoinPublicClient,
   FilecoinRpcSchema,
+  TraceableRpcSchema,
 } from './types';
 
 export interface CreateClientForChainParameters {
@@ -14,7 +15,7 @@ export interface CreateClientForChainParameters {
   authToken?: string | null;
 }
 
-const filecoinRpcSchema = rpcSchema<FilecoinRpcSchema>();
+const filecoinRpcSchema = rpcSchema<TraceableRpcSchema | FilecoinRpcSchema>();
 
 export class StrictMap<K, V> extends Map<K, V> {
   override get(key: K): V {
@@ -128,4 +129,24 @@ export function compareNullableNumber<T extends number | bigint>(
   if (b === null) return higherValue;
 
   return a < b ? lowerValue : a > b ? higherValue : 0;
+}
+
+export function sortLogs<T extends Log>(logs: T[]): T[] {
+  return [...logs].sort((a, b) => {
+    const blockOrder = compareNullableNumber(
+      a.blockNumber,
+      b.blockNumber,
+      'asc',
+    );
+    if (blockOrder !== 0) return blockOrder;
+
+    const transactionOrder = compareNullableNumber(
+      a.transactionIndex,
+      b.transactionIndex,
+      'asc',
+    );
+    if (transactionOrder !== 0) return transactionOrder;
+
+    return compareNullableNumber(a.logIndex, b.logIndex, 'asc');
+  });
 }

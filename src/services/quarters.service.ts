@@ -398,6 +398,31 @@ export class QuartersService {
         : minLotFloorAttoUsd;
     const minLotUsd = divideBigInt(minLotAttoUsd, 10n ** 18n, 2);
 
+    // Registration cutoff
+    const registrationCutoffParameter = quarterParameters.find(
+      (p) =>
+        p.parameter_type ===
+        ServiceRewardsActorParameterType.REGISTRATION_CUTOFF_EPOCHS,
+    );
+
+    if (registrationCutoffParameter === undefined) {
+      throw this.createMissingParameterError(
+        quarterNumInt,
+        ServiceRewardsActorParameterType.REGISTRATION_CUTOFF_EPOCHS,
+      );
+    }
+
+    const registrationCutoff = BigNumber(
+      registrationCutoffParameter.parameter_value,
+    ).toBigInt();
+
+    if (registrationCutoff === null) {
+      throw this.createInvalidParameterError(
+        quarterNumInt,
+        ServiceRewardsActorParameterType.PRICE_BAND_BPS,
+      );
+    }
+
     return {
       previousQuarterBoundVolumeAttoUsd,
       previousQuarterBoundVolumeUsd,
@@ -414,6 +439,7 @@ export class QuartersService {
       minLotUsd,
       priceBandBps,
       priceBand,
+      registrationCutoff,
       admittedStablecoins: quarterTokens.map((t) => t.token_address as Address),
       admittedFilecoinPayContractAddresses: quarterFilecoinPayContracts.map(
         (c) => c.contract_address as Address,

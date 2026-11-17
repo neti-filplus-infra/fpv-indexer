@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
 import FilecoinPayV1ABI from '@/abis/filecoin-pay-v1.abi';
 import { db } from '@/db/db';
-import { ERC20Metadata, FilecoinActions } from '@/lib/types';
+import { ERC20Metadata, FilecoinActions, TraceResult } from '@/lib/types';
 import { ConfigSeedService } from '@/services/config-seed.service';
 import { IndexerOrchestratorService } from '@/services/indexer-orchestrator.service';
 import { QuartersService } from '@/services/quarters.service';
@@ -21,6 +21,8 @@ import {
   encodeFunctionData,
   Hash,
   isAddressEqual,
+  isHex,
+  toHex,
   TransactionNotFoundError,
   zeroAddress,
 } from 'viem';
@@ -30,29 +32,46 @@ import '../src/polyfill';
 import { ERC20TokenInfoService } from '../src/services/erc-20-token-info.service';
 import { FilfoxApiService } from '../src/services/filfox-api.service';
 
-type TestLog = {
-  address: Address;
+type TestLogInput = {
+  address?: Address;
   eventName: string;
   args: Record<string, unknown>;
+};
+
+type TestLog = Omit<TestLogInput, 'address'> & {
+  address: Address;
   blockNumber: bigint;
   logIndex: number;
-  transactionIndex?: number;
+  transactionIndex: number;
   transactionHash: Hash;
 };
 
+type TestTransactionInput = {
+  from?: Address;
+  hash?: Hash;
+  input?: Hash;
+  logs?: TestLogInput[];
+  to?: Address;
+  trace?: TraceResult[];
+  value?: bigint;
+};
+
 type TestTransaction = {
+  blockNumber: number;
   hash: Hash;
+  from: Address;
+  index: number;
   input: Hash;
+  logs: TestLog[];
+  to: Address;
+  trace: TraceResult[];
   value: bigint;
 };
 
-interface LogInputs {
-  address: Address;
-  blockNumber: bigint;
-  txHash?: Hash;
-  logIndex?: number;
-  transactionIndex?: number;
-}
+type TestBlockInput = {
+  blockNumber: number;
+  transactions: TestTransactionInput[];
+};
 
 const serviceRewardsActorValue = process.env['SERVICE_REWARDS_ACTOR_ADDRESS'];
 if (!serviceRewardsActorValue) {
@@ -82,7 +101,6 @@ const payerB =
 
 class TestFilecoinClient {
   public filecoin: FilecoinActions['filecoin'];
-  private logs: TestLog[] = [];
   private transactionsMap: Map<Hash, TestTransaction> = new Map();
   private currentBlockNumber: bigint = 0n;
 
@@ -101,17 +119,87 @@ class TestFilecoinClient {
     };
   }
 
-  public resetWithLogs(logs: TestLog[], transactions: TestTransaction[] = []) {
-    if (logs.some((log) => log.blockNumber === 0n)) {
-      throw new TypeError('Test logs must start after block number 0.');
-    }
-
+  public reset(blocks: TestBlockInput[] = []) {
     this.currentBlockNumber = 0n;
-    this.replaceLogs(logs, transactions);
-  }
 
-  public replaceLogs(logs: TestLog[], transactions: TestTransaction[] = []) {
-    this.logs = logs;
+    blocks.forEach((block, index) => {
+      if (block.blockNumber < 1n) {
+        throw new Error(
+          `Blocks need to start from block number 1 - "${block.blockNumber}" given.`,
+        );
+      }
+
+      const firstIndex = blocks.findIndex(
+        (candidate) => candidate.blockNumber === block.blockNumber,
+      );
+
+      if (firstIndex !== index) {
+        throw new Error(`Duplicate block number "${block.blockNumber}" found.`);
+      }
+    });
+
+    const transactions: TestTransaction[] = blocks
+      .toSorted((a, b) => a.blockNumber - b.blockNumber)
+      .flatMap(({ blockNumber, transactions: transactionsInputs }) => {
+        let logIndex = 0;
+
+        return transactionsInputs.map((txInput, transactionIndex) => {
+          const {
+            from = zeroAddress,
+            hash = nextTxHash(),
+            input = '0x0',
+            to = zeroAddress,
+            value = 0n,
+          } = txInput;
+          const logs: TestLog[] = txInput.logs
+            ? txInput.logs.map((logInput) => {
+                return {
+                  ...logInput,
+                  address: logInput.address ?? to,
+                  blockNumber: BigInt(blockNumber),
+                  logIndex: logIndex++,
+                  transactionIndex,
+                  transactionHash: hash,
+                } satisfies TestLog;
+              })
+            : [];
+
+          return {
+            blockNumber,
+            from,
+            hash,
+            index: transactionIndex,
+            input,
+            logs,
+            to,
+            value,
+            trace: txInput.trace ?? [
+              {
+                blockNumber: blockNumber,
+                transactionHash: hash,
+                transactionPosition: transactionIndex,
+                action: {
+                  callType: 'call',
+                  from,
+                  to,
+                  gas: '0x0',
+                  input,
+                  value: `0x${value.toString(16)}`,
+                },
+                type: 'call',
+                subtraces: 0,
+                traceAddress: [],
+                blockHash: '0x0',
+                result: {
+                  gasUsed: '0x0',
+                  output: '0x0',
+                },
+              },
+            ],
+          } satisfies TestTransaction;
+        });
+      });
+
     this.transactionsMap = new Map(transactions.map((t) => [t.hash, t]));
   }
 
@@ -140,18 +228,25 @@ class TestFilecoinClient {
     fromBlock?: bigint;
     toBlock?: bigint;
   }) {
-    return this.logs
-      .filter((log) => {
+    const logs = Array.from(this.transactionsMap.values())
+      .filter((tx) => {
+        const txBlockNumber = BigInt(tx.blockNumber);
+
         return (
-          (!address || log.address.toLowerCase() === address.toLowerCase()) &&
-          (fromBlock === undefined || log.blockNumber >= fromBlock) &&
-          (toBlock === undefined || log.blockNumber <= toBlock)
+          (fromBlock === undefined || txBlockNumber >= fromBlock) &&
+          (toBlock === undefined || txBlockNumber <= toBlock)
         );
       })
-      .map((log) => ({
-        ...log,
-        transactionIndex: log.transactionIndex ?? 0,
-      }));
+      .flatMap((tx) => {
+        return tx.logs.filter((log) => {
+          return (
+            address === undefined ||
+            log.address.toLowerCase() === address.toLowerCase()
+          );
+        });
+      });
+
+    return logs;
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await
@@ -169,6 +264,38 @@ class TestFilecoinClient {
 
     return transaction;
   }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
+  public async request({
+    method,
+    params,
+  }: {
+    method: string;
+    params: unknown[];
+  }) {
+    switch (method) {
+      case 'trace_transaction':
+        return this.prepareTxTrace(params[0]);
+      default:
+        throw new Error(
+          `Request method "${method}" not implemented on TestFilecoinClient`,
+        );
+    }
+  }
+
+  private prepareTxTrace(hash: unknown): TraceResult[] {
+    if (typeof hash !== 'string' || !isHex(hash)) {
+      throw new Error('Invalid tx hash');
+    }
+
+    const tx = this.transactionsMap.get(hash);
+
+    if (!tx) {
+      throw new Error(`Tx "${hash}" not found`);
+    }
+
+    return tx.trace;
+  }
 }
 
 class TestToken {
@@ -179,9 +306,13 @@ class TestToken {
   ) {}
 
   public formatNumericValue(numericValue: number | bigint | string): bigint {
-    const result = BigNumber(numericValue)
-      .times(BigNumber(10).pow(this.decimals))
-      .toBigInt();
+    const bn = BigNumber(numericValue);
+
+    if (bn.eq(0)) {
+      return 0n;
+    }
+
+    const result = bn.times(BigNumber(10).pow(this.decimals)).toBigInt();
 
     if (!result) {
       throw new TypeError(
@@ -264,6 +395,385 @@ class TestFilfoxApiService {
   }
 }
 
+let txNumber = 0;
+
+function nextTxHash(): Hash {
+  txNumber = txNumber + 1;
+  return `0x${txNumber.toString(16).padStart(64, '0')}`;
+}
+
+function block(
+  blockNumber: bigint | number,
+  transactions: TestTransactionInput[],
+): TestBlockInput {
+  return {
+    blockNumber: Number(blockNumber),
+    transactions,
+  };
+}
+
+function rail({
+  filecoinPayContract,
+  payee,
+  payer,
+  operator,
+  railId,
+  token,
+  validator,
+}: {
+  filecoinPayContract: Address;
+  payee: Address;
+  payer: Address;
+  operator: Address;
+  railId: bigint;
+  token: TestToken;
+  validator: Address;
+}) {
+  function railCreatedTx() {
+    return {
+      to: filecoinPayContract,
+      logs: [
+        {
+          eventName: 'RailCreated',
+          args: {
+            railId,
+            payer,
+            payee,
+            operator,
+            validator,
+            token: token.address,
+          },
+        },
+      ],
+    };
+  }
+
+  function railSettledTx({
+    networkFee = 0n,
+    operatorCommission = 0n,
+    settledUpTo,
+    totalNetPayeeAmount = 0n,
+  }: {
+    networkFee?: number | bigint | string;
+    operatorCommission?: number | bigint | string;
+    settledUpTo: bigint;
+    totalNetPayeeAmount?: number | bigint | string;
+  }) {
+    const networkFeeFormatted = token.formatNumericValue(networkFee);
+    const operatorCommissionFormatted =
+      token.formatNumericValue(operatorCommission);
+    const totalNetPayeeAmountFormatted =
+      token.formatNumericValue(totalNetPayeeAmount);
+
+    return {
+      to: filecoinPayContract,
+      logs: [
+        {
+          eventName: 'RailSettled',
+          args: {
+            networkFee: networkFeeFormatted,
+            operatorCommission: operatorCommissionFormatted,
+            railId,
+            settledUpTo,
+            totalNetPayeeAmount: totalNetPayeeAmountFormatted,
+            totalSettledAmount:
+              networkFeeFormatted +
+              operatorCommissionFormatted +
+              totalNetPayeeAmountFormatted,
+          },
+        },
+      ],
+    };
+  }
+
+  function railOneTimePaymentProcessedTx({
+    netPayeeAmount = 0n,
+    networkFee = 0n,
+    operatorCommission = 0n,
+  }: {
+    netPayeeAmount?: number | bigint | string;
+    networkFee?: number | bigint | string;
+    operatorCommission?: number | bigint | string;
+  }) {
+    const netPayeeAmountFormatted = token.formatNumericValue(netPayeeAmount);
+    const networkFeeFormatted = token.formatNumericValue(networkFee);
+    const operatorCommissionFormatted =
+      token.formatNumericValue(operatorCommission);
+
+    return {
+      to: filecoinPayContract,
+      logs: [
+        {
+          eventName: 'RailOneTimePaymentProcessed',
+          args: {
+            railId,
+            netPayeeAmount: netPayeeAmountFormatted,
+            networkFee: networkFeeFormatted,
+            operatorCommission: operatorCommissionFormatted,
+          },
+        },
+      ],
+    };
+  }
+
+  return {
+    filecoinPayContract,
+    payee,
+    payer,
+    operator,
+    railId,
+    token,
+    validator,
+    railCreatedTx,
+    railSettledTx,
+    railOneTimePaymentProcessedTx,
+  };
+}
+
+function orchestratorAdmittedTx({
+  orchestrator,
+  wallet,
+}: {
+  orchestrator: Address;
+  wallet: Address;
+}): TestTransactionInput {
+  return {
+    to: serviceRewardsActor,
+    logs: [
+      {
+        eventName: 'OrchestratorAdmitted',
+        args: { orch: orchestrator, wallet },
+      },
+    ],
+  };
+}
+
+function orchestratorRemovedTx({
+  orchestrator,
+}: {
+  orchestrator: Address;
+}): TestTransactionInput {
+  return {
+    to: serviceRewardsActor,
+    logs: [
+      {
+        eventName: 'OrchestratorRemoved',
+        args: { orch: orchestrator },
+      },
+    ],
+  };
+}
+
+function bindingReassignedTx({
+  payer,
+  operator,
+  orchestrator,
+  inherit,
+}: {
+  payer: Address;
+  operator: Address;
+  orchestrator: Address;
+  inherit: boolean;
+}): TestTransactionInput {
+  return {
+    to: serviceRewardsActor,
+    logs: [
+      {
+        eventName: 'BindingReassigned',
+        args: { payer, operator, orchestrator, inherit },
+      },
+    ],
+  };
+}
+
+function bindingCanceledTx({
+  payer,
+  operator,
+  orchestrator,
+}: {
+  payer: Address;
+  operator: Address;
+  orchestrator: Address;
+}): TestTransactionInput {
+  return {
+    to: serviceRewardsActor,
+    logs: [
+      {
+        eventName: 'BindingCanceled',
+        args: { payer, operator, orchestrator },
+      },
+    ],
+  };
+}
+
+function admittedListsUpdatedTx({
+  filecoinPayContracts,
+  stablecoins,
+}: {
+  filecoinPayContracts: Address[];
+  stablecoins: Address[];
+}): TestTransactionInput {
+  return {
+    to: serviceRewardsActor,
+    logs: [
+      {
+        eventName: 'AdmittedListsUpdated',
+        args: { filecoinPayContracts, stablecoins },
+      },
+    ],
+  };
+}
+
+function pricingParamsUpdatedTx({
+  minLotFloor,
+  minLotAlphaNum,
+  minLotAlphaDen,
+  priceBand,
+  registrationCutoff,
+}: {
+  minLotFloor: bigint;
+  minLotAlphaNum: bigint;
+  minLotAlphaDen: bigint;
+  priceBand: bigint;
+  registrationCutoff: bigint;
+}): TestTransactionInput {
+  return {
+    to: serviceRewardsActor,
+    logs: [
+      {
+        eventName: 'PricingParamsUpdated',
+        args: {
+          minLotFloor,
+          minLotAlphaNum,
+          minLotAlphaDen,
+          priceBand,
+          registrationCutoff,
+        },
+      },
+    ],
+  };
+}
+
+function bindingDeclaredTx({
+  payer,
+  operator,
+  orchestrator,
+}: {
+  payer: Address;
+  operator: Address;
+  orchestrator: Address;
+}): TestTransactionInput {
+  return {
+    to: serviceRewardsActor,
+    logs: [
+      { eventName: 'BindingDeclared', args: { payer, operator, orchestrator } },
+    ],
+  };
+}
+
+function volumePostedTx({
+  orchestrator,
+  q,
+  volume,
+}: {
+  orchestrator: Address;
+  q: bigint;
+  volume: bigint;
+}) {
+  return {
+    to: serviceRewardsActor,
+    logs: [
+      {
+        eventName: 'VolumePosted',
+        args: {
+          orchestrator,
+          q,
+          volume,
+        },
+      },
+    ],
+  };
+}
+
+function volumeCorrectedTx({
+  orchestrator,
+  q,
+  volume,
+}: {
+  orchestrator: Address;
+  q: bigint;
+  volume: bigint;
+}) {
+  return {
+    to: serviceRewardsActor,
+    logs: [
+      {
+        eventName: 'VolumeCorrected',
+        args: {
+          orchestrator,
+          q,
+          volume,
+        },
+      },
+    ],
+  };
+}
+
+function sharesSubmittedTx({
+  q,
+  recipientCount,
+  totalUsd,
+}: {
+  q: bigint;
+  recipientCount?: bigint;
+  totalUsd: bigint;
+}): TestTransactionInput {
+  return {
+    to: serviceRewardsActor,
+    logs: [
+      {
+        eventName: 'SharesSubmitted',
+        args: {
+          q,
+          recipientCount: recipientCount ?? 1n,
+          totalUsd,
+        },
+      },
+    ],
+  };
+}
+
+function burnForFeesTx({
+  filecoinPayContract,
+  recipient,
+  requested,
+  token,
+  value,
+}: {
+  filecoinPayContract: Address;
+  recipient: Address;
+  requested: bigint;
+  token: Address;
+  value: bigint;
+}): TestTransactionInput {
+  return {
+    to: filecoinPayContract,
+    value,
+    input: encodeFunctionData({
+      abi: FilecoinPayV1ABI,
+      functionName: 'burnForFees',
+      args: [token, recipient, requested],
+    }),
+    logs: [
+      {
+        address: token,
+        eventName: 'Transfer',
+        args: { from: filecoinPayContract, to: recipient, value: requested },
+      },
+    ],
+  };
+}
+
 describe('FIP-0118 adherence test', () => {
   let testFilecoinClient: TestFilecoinClient;
   let app: INestApplication;
@@ -302,7 +812,7 @@ describe('FIP-0118 adherence test', () => {
   beforeEach(async () => {
     await resetDatabase();
     await app.get(ConfigSeedService).onApplicationBootstrap();
-    testFilecoinClient.resetWithLogs([]);
+    testFilecoinClient.reset();
   });
 
   // Tests:
@@ -310,85 +820,66 @@ describe('FIP-0118 adherence test', () => {
   // - totalSettledAmount is used for settlements calculation
   it('ERC20 decimals are normalized to atto-USD', async () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
 
-    testFilecoinClient.resetWithLogs([
+    const railTwo = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 2n,
+      token: axlUsdcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 0n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address, axlUsdcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        operator: operatorA,
-        payer: payerA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        railId: 2n,
-        logIndex: 5,
-        token: axlUsdcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 0n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address, axlUsdcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: operatorA,
+          payer: payerA,
+        }),
+        railOne.railCreatedTx(),
+        railTwo.railCreatedTx(),
+      ]),
 
       // settlments in Q1
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue('1.5'),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue('1.4'),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue('0.1'),
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 1,
-        railId: 2n,
-        totalSettledAmount: axlUsdcToken.formatNumericValue('1.5'),
-        totalNetPayeeAmount: axlUsdcToken.formatNumericValue('1.4'),
-        operatorCommission: 0n,
-        networkFee: axlUsdcToken.formatNumericValue('0.1'),
-      }),
+      block(q1.startEpoch, [
+        railOne.railSettledTx({
+          totalNetPayeeAmount: 1.4,
+          networkFee: 0.1,
+          settledUpTo: q1.startEpoch,
+        }),
+        railTwo.railSettledTx({
+          totalNetPayeeAmount: 1.4,
+          networkFee: 0.1,
+          settledUpTo: q1.startEpoch,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q1.endEpoch + 1n);
@@ -416,62 +907,50 @@ describe('FIP-0118 adherence test', () => {
   it('Gross total is used for one time payments', async () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
 
-    testFilecoinClient.resetWithLogs([
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 0n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        operator: operatorA,
-        payer: payerA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 0n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: operatorA,
+          payer: payerA,
+        }),
+        railOne.railCreatedTx(),
+      ]),
 
       // one time payment in Q1
-      railOneTimePaymentProcessedLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 0,
-        railId: 1n,
-        netPayeeAmount: usdfcToken.formatNumericValue('1.3'),
-        operatorCommission: usdfcToken.formatNumericValue('0.1'),
-        networkFee: usdfcToken.formatNumericValue('0.1'),
-      }),
+      block(q1.startEpoch, [
+        railOne.railOneTimePaymentProcessedTx({
+          netPayeeAmount: 1.3,
+          operatorCommission: 0.1,
+          networkFee: 0.1,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q1.endEpoch + 1n);
@@ -500,98 +979,76 @@ describe('FIP-0118 adherence test', () => {
   //   excluded from quarter volume
   it('Settlement quarter boundaries are respected', async () => {
     const q2 = await app.get(QuartersService).getQuarterByIndex(2);
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
 
-    testFilecoinClient.resetWithLogs([
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 0n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        operator: operatorA,
-        payer: payerA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 0n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: operatorA,
+          payer: payerA,
+        }),
+        railOne.railCreatedTx(),
+      ]),
 
       // settlments in Q1
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q2.startEpoch - 1n,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue('100'),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue('99'),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue('1'),
-      }),
+      block(q2.startEpoch - 1n, [
+        railOne.railSettledTx({
+          totalNetPayeeAmount: 99,
+          networkFee: 1,
+          settledUpTo: q2.startEpoch - 1n,
+        }),
+      ]),
 
       // settlments in Q2
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q2.startEpoch,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue('1.5'),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue('1.4'),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue('0.1'),
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q2.endEpoch,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue('1.5'),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue('1.4'),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue('0.1'),
-      }),
+      block(q2.startEpoch, [
+        railOne.railSettledTx({
+          settledUpTo: q2.startEpoch,
+          totalNetPayeeAmount: 1.4,
+          networkFee: 0.1,
+        }),
+      ]),
+
+      block(q2.endEpoch, [
+        railOne.railSettledTx({
+          settledUpTo: q2.endEpoch,
+          totalNetPayeeAmount: 1.4,
+          networkFee: 0.1,
+        }),
+      ]),
 
       // settlments in Q3
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q2.endEpoch + 1n,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue('200'),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue('198'),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue('2'),
-      }),
+      block(q2.endEpoch + 1n, [
+        railOne.railSettledTx({
+          settledUpTo: q2.endEpoch + 1n,
+          totalNetPayeeAmount: 198,
+          networkFee: 2,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q2.endEpoch + 1n);
@@ -620,125 +1077,93 @@ describe('FIP-0118 adherence test', () => {
   it('Settlements across multiple rails are aggregated', async () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
 
-    testFilecoinClient.resetWithLogs([
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+    const railTwo = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 2n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+    const railThree = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 3n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorB,
+      validator: zeroAddress,
+    });
+    const railFour = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 4n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerB,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 0n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        operator: operatorA,
-        payer: payerA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        railId: 2n,
-        logIndex: 5,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        railId: 3n,
-        logIndex: 6,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorB,
-        validator: zeroAddress,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        railId: 4n,
-        logIndex: 7,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerB,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 0n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: operatorA,
+          payer: payerA,
+        }),
+        railOne.railCreatedTx(),
+        railTwo.railCreatedTx(),
+        railThree.railCreatedTx(),
+        railFour.railCreatedTx(),
+      ]),
 
       // payments in Q1
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue('1.5'),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue('1.4'),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue('0.1'),
-      }),
-      railOneTimePaymentProcessedLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 1,
-        railId: 2n,
-        netPayeeAmount: usdfcToken.formatNumericValue('1.4'),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue('0.1'),
-      }),
-
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 2,
-        railId: 3n,
-        totalSettledAmount: usdfcToken.formatNumericValue('150'),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue('140'),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue('10'),
-      }),
-      railOneTimePaymentProcessedLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 3,
-        railId: 4n,
-        netPayeeAmount: usdfcToken.formatNumericValue('140'),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue('10'),
-      }),
+      block(q1.startEpoch, [
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 1.4,
+          networkFee: 0.1,
+        }),
+        railTwo.railOneTimePaymentProcessedTx({
+          netPayeeAmount: 1.4,
+          networkFee: 0.1,
+        }),
+        railThree.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 140,
+          networkFee: 10,
+        }),
+        railFour.railOneTimePaymentProcessedTx({
+          netPayeeAmount: 140,
+          networkFee: 10,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q1.endEpoch + 1n);
@@ -768,185 +1193,151 @@ describe('FIP-0118 adherence test', () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
     const q2 = await app.get(QuartersService).getQuarterByIndex(2);
 
-    testFilecoinClient.resetWithLogs([
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+    const railTwo = rail({
+      filecoinPayContract: filecoinPayContractB,
+      railId: 2n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+    const railThree = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 3n,
+      token: axlUsdcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+    const railFour = rail({
+      filecoinPayContract: filecoinPayContractB,
+      railId: 4n,
+      token: axlUsdcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 0n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        operator: operatorA,
-        payer: payerA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractB,
-        blockNumber: 1n,
-        railId: 2n,
-        logIndex: 5,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 6,
-        railId: 3n,
-        token: axlUsdcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractB,
-        blockNumber: 1n,
-        railId: 4n,
-        logIndex: 7,
-        token: axlUsdcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 0n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: operatorA,
+          payer: payerA,
+        }),
+        railOne.railCreatedTx(),
+        railTwo.railCreatedTx(),
+        railThree.railCreatedTx(),
+        railFour.railCreatedTx(),
+      ]),
 
       // settlements in Q1
-      // USDFC settlement on contract A (should count)
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(1n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      // USDFC settlement on contract B (should NOT count)
-      railSettledLog({
-        address: filecoinPayContractB,
-        blockNumber: q1.startEpoch,
-        logIndex: 1,
-        railId: 2n,
-        totalSettledAmount: usdfcToken.formatNumericValue(10n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(10n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      // axlUSDC settlement on contract A (should NOT count)
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 2,
-        railId: 3n,
-        totalSettledAmount: axlUsdcToken.formatNumericValue(100n),
-        totalNetPayeeAmount: axlUsdcToken.formatNumericValue(100n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      // axlUSDC settlement on contract B (should NOT count)
-      railSettledLog({
-        address: filecoinPayContractB,
-        blockNumber: q1.startEpoch,
-        logIndex: 3,
-        railId: 4n,
-        totalSettledAmount: axlUsdcToken.formatNumericValue(1000n),
-        totalNetPayeeAmount: axlUsdcToken.formatNumericValue(1000n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+
+      block(q1.startEpoch, [
+        // USDFC settlement on contract A (should count)
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 1,
+        }),
+        // USDFC settlement on contract B (should NOT count)
+        railTwo.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 10,
+        }),
+        // axlUSDC settlement on contract A (should NOT count)
+        railThree.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 100,
+        }),
+        // axlUSDC settlement on contract B (should NOT count)
+        railFour.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 1000,
+        }),
+      ]),
 
       // admitted lists switch during Q1 (should apply from Q2)
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.endEpoch,
-        logIndex: 0,
-        filecoinPayContracts: [filecoinPayContractB],
-        stablecoins: [axlUsdcToken.address],
-      }),
+      block(q1.startEpoch + 1n, [
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractB],
+          stablecoins: [axlUsdcToken.address],
+        }),
+      ]),
+
+      block(q1.startEpoch + 2n, [
+        // USDFC settlement on contract A (should still count)
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 1,
+        }),
+        // USDFC settlement on contract B (should still NOT count)
+        railTwo.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 10,
+        }),
+        // axlUSDC settlement on contract A (should still NOT count)
+        railThree.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 100,
+        }),
+        // axlUSDC settlement on contract B (should still NOT count)
+        railFour.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 1000,
+        }),
+      ]),
 
       // settlements in Q2
-      // USDFC settlement on contract A (should NOT count)
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q2.startEpoch,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(1000n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1000n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      // USDFC settlement on contract B (should NOT count)
-      railSettledLog({
-        address: filecoinPayContractB,
-        blockNumber: q2.startEpoch,
-        logIndex: 1,
-        railId: 2n,
-        totalSettledAmount: usdfcToken.formatNumericValue(100n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(100n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      // axlUSDC settlement on contract A (should NOT count)
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q2.startEpoch,
-        logIndex: 2,
-        railId: 3n,
-        totalSettledAmount: axlUsdcToken.formatNumericValue(10n),
-        totalNetPayeeAmount: axlUsdcToken.formatNumericValue(10n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      // axlUSDC settlement on contract B (should count)
-      railSettledLog({
-        address: filecoinPayContractB,
-        blockNumber: q2.startEpoch,
-        logIndex: 3,
-        railId: 4n,
-        totalSettledAmount: axlUsdcToken.formatNumericValue(1n),
-        totalNetPayeeAmount: axlUsdcToken.formatNumericValue(1n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q2.startEpoch, [
+        // USDFC settlement on contract A (should NOT count)
+        railOne.railSettledTx({
+          settledUpTo: q2.startEpoch,
+          totalNetPayeeAmount: 1000,
+        }),
+        // USDFC settlement on contract B (should NOT count)
+        railTwo.railSettledTx({
+          settledUpTo: q2.startEpoch,
+          totalNetPayeeAmount: 100,
+        }),
+        // axlUSDC settlement on contract A (should NOT count)
+        railThree.railSettledTx({
+          settledUpTo: q2.startEpoch,
+          totalNetPayeeAmount: 10,
+        }),
+        // axlUSDC settlement on contract B (should count)
+        railFour.railSettledTx({
+          settledUpTo: q2.startEpoch,
+          totalNetPayeeAmount: 1,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q2.endEpoch + 1n);
@@ -961,20 +1352,24 @@ describe('FIP-0118 adherence test', () => {
       .get(`/volume/2/${orchestratorA}`)
       .expect(200);
 
-    const expectedStablecoinVolume = filToken
+    const expectedStablecoinVolumeQ1 = filToken
+      .formatNumericValue('2')
+      .toString();
+
+    const expectedStablecoinVolumeQ2 = filToken
       .formatNumericValue('1')
       .toString();
 
     expect(responseQ1.body).toMatchObject({
-      stablecoinVolumeAttoUsd: expectedStablecoinVolume,
+      stablecoinVolumeAttoUsd: expectedStablecoinVolumeQ1,
       filVolumeAttoUsd: '0',
-      volumeAttoUsd: expectedStablecoinVolume,
+      volumeAttoUsd: expectedStablecoinVolumeQ1,
     });
 
     expect(responseQ2.body).toMatchObject({
-      stablecoinVolumeAttoUsd: expectedStablecoinVolume,
+      stablecoinVolumeAttoUsd: expectedStablecoinVolumeQ2,
       filVolumeAttoUsd: '0',
-      volumeAttoUsd: expectedStablecoinVolume,
+      volumeAttoUsd: expectedStablecoinVolumeQ2,
     });
   });
 
@@ -983,98 +1378,71 @@ describe('FIP-0118 adherence test', () => {
   it('Excludes unbound settlements and one time payments', async () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
 
-    testFilecoinClient.resetWithLogs([
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+    const railTwo = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 2n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerB,
+      operator: operatorB,
+      validator: zeroAddress,
+    });
+
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 0n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorB,
-        wallet: orchestratorB,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 4,
-        orchestrator: orchestratorA,
-        operator: operatorA,
-        payer: payerB,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 5,
-        orchestrator: orchestratorB,
-        operator: operatorB,
-        payer: payerA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 6,
-        railId: 1n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        railId: 2n,
-        logIndex: 7,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerB,
-        operator: operatorB,
-        validator: zeroAddress,
-      }),
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 0n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorB,
+          wallet: orchestratorB,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: operatorA,
+          payer: payerB,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorB,
+          operator: operatorB,
+          payer: payerA,
+        }),
+        railOne.railCreatedTx(),
+        railTwo.railCreatedTx(),
+      ]),
 
       // Q1 payments
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(100n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(100n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      railOneTimePaymentProcessedLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 1,
-        railId: 2n,
-        netPayeeAmount: usdfcToken.formatNumericValue(100n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q1.startEpoch, [
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 100,
+        }),
+        railTwo.railOneTimePaymentProcessedTx({
+          netPayeeAmount: 1000,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q1.endEpoch + 1n);
@@ -1112,94 +1480,74 @@ describe('FIP-0118 adherence test', () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
     const q2 = await app.get(QuartersService).getQuarterByIndex(2);
 
-    testFilecoinClient.resetWithLogs([
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 0n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 3,
-        railId: 1n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 0n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        railOne.railCreatedTx(),
+      ]),
 
       // Q1 events
 
       // Rail settlement in Q1 (should NOT count if pair registered in Q2)
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(1000n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1000n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q1.startEpoch, [
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 1000,
+        }),
+      ]),
 
       // Q2 events
 
       // Settlement in Q2 (should count even if pair is registered after
       // settlement, but before REGISTRATION_CUTOFF)
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q2.startEpoch,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(1n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q2.startEpoch, [
+        railOne.railSettledTx({
+          settledUpTo: q2.startEpoch,
+          totalNetPayeeAmount: 1,
+        }),
+      ]),
 
       // Binding after some settlements using that pair in Q2 were made
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q2.startEpoch + 1n,
-        logIndex: 0,
-        orchestrator: orchestratorA,
-        operator: operatorA,
-        payer: payerA,
-      }),
+      block(q2.startEpoch + 1n, [
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: operatorA,
+          payer: payerA,
+        }),
+      ]),
 
       // Settlement after binding, the default case
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q2.startEpoch + 2n,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(1n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q2.startEpoch + 2n, [
+        railOne.railSettledTx({
+          settledUpTo: q2.startEpoch + 2n,
+          totalNetPayeeAmount: 1,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q2.endEpoch + 1n);
@@ -1239,115 +1587,89 @@ describe('FIP-0118 adherence test', () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
     const q2 = await app.get(QuartersService).getQuarterByIndex(2);
 
-    testFilecoinClient.resetWithLogs([
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+    const railTwo = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 2n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerB,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 0n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 3,
-        railId: 1n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 2n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerB,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 0n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        railOne.railCreatedTx(),
+        railTwo.railCreatedTx(),
+      ]),
 
       // Q1 events
+      block(q1.startEpoch, [
+        // Rail 1 settlement in Q1 (should count if pair registered before cutoff)
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 1,
+        }),
+        // Rail 2 settlement in Q1 (should NOT count if pair registered after
+        // cutoff)
+        railTwo.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 1000,
+        }),
+      ]),
 
-      // Rail 1 settlement in Q1 (should count if pair registered before cutoff)
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(1n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q1.startEpoch + 4n, [
+        // Registration of rail 1 pair before cutoff
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: operatorA,
+          payer: payerA,
+        }),
+      ]),
 
-      // Rail 2 settlement in Q1 (should NOT count if pair registered after
-      // cutoff)
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 1,
-        railId: 2n,
-        totalSettledAmount: usdfcToken.formatNumericValue(1000n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1000n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-
-      // Registration of rail 1 pair before cutoff
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 4n,
-        logIndex: 0,
-        orchestrator: orchestratorA,
-        operator: operatorA,
-        payer: payerA,
-      }),
-
-      // Registration of rail 2 pair after cutoff
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 5n,
-        logIndex: 0,
-        orchestrator: orchestratorA,
-        operator: operatorA,
-        payer: payerB,
-      }),
+      block(q1.startEpoch + 5n, [
+        // Registration of rail 2 pair after cutoff
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: operatorA,
+          payer: payerB,
+        }),
+      ]),
 
       // Q2 events
 
       // Rail 2 settlement in Q2 (should now count)
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q2.startEpoch,
-        logIndex: 0,
-        railId: 2n,
-        totalSettledAmount: usdfcToken.formatNumericValue(1n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q2.startEpoch, [
+        railTwo.railSettledTx({
+          settledUpTo: q2.startEpoch,
+          totalNetPayeeAmount: 1,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q2.endEpoch + 1n);
@@ -1384,110 +1706,73 @@ describe('FIP-0118 adherence test', () => {
   it('Attributes volume properly after orchestrator removal', async () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
 
-    testFilecoinClient.resetWithLogs([
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 0n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorB,
-        wallet: orchestratorB,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 5,
-        orchestrator: orchestratorA,
-        operator: operatorA,
-        payer: payerA,
-      }),
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
 
-      // Settlement before A removal, should count towards A
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(1n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+    testFilecoinClient.reset([
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 0n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorB,
+          wallet: orchestratorB,
+        }),
+        railOne.railCreatedTx(),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: operatorA,
+          payer: payerA,
+        }),
+      ]),
 
-      // A gets removed same epoch, binding should be released
-      orchestratorRemovedLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 1,
-        orchestrator: orchestratorA,
-      }),
-      // Same epoch released settlement
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 2,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(10n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(10n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q1.startEpoch + 1n, [
+        // Settlement before A removal, should count towards A
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch + 1n,
+          totalNetPayeeAmount: 1,
+        }),
+        // A gets removed same epoch, binding should be released
+        orchestratorRemovedTx({ orchestrator: orchestratorA }),
+        // Same epoch released settlement
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch + 1n,
+          totalNetPayeeAmount: 10,
+        }),
+        // B bind released pair, previous settlement now counts towards B's volume
+        bindingDeclaredTx({
+          orchestrator: orchestratorB,
+          operator: operatorA,
+          payer: payerA,
+        }),
+      ]),
 
-      // B bind released pair, previous settlement now counts towards B's volume
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 2n,
-        logIndex: 0,
-        orchestrator: orchestratorB,
-        operator: operatorA,
-        payer: payerA,
-      }),
-
-      // Another settlement when B already binds the pair
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 3n,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(100n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(100n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q1.startEpoch + 3n, [
+        // Another settlement when B already binds the pair
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch + 3n,
+          totalNetPayeeAmount: 100,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q1.endEpoch + 1n);
@@ -1502,9 +1787,9 @@ describe('FIP-0118 adherence test', () => {
       .expect(200);
 
     expect(responseA.body).toMatchObject({
-      stablecoinVolumeAttoUsd: usdfcToken.formatNumericValue(1n).toString(),
+      stablecoinVolumeAttoUsd: usdfcToken.formatNumericValue(0n).toString(),
       filVolumeAttoUsd: '0',
-      volumeAttoUsd: usdfcToken.formatNumericValue(1n).toString(),
+      volumeAttoUsd: usdfcToken.formatNumericValue(0n).toString(),
     });
 
     expect(responseB.body).toMatchObject({
@@ -1524,328 +1809,217 @@ describe('FIP-0118 adherence test', () => {
     const q2 = await app.get(QuartersService).getQuarterByIndex(2);
 
     const commonRailOptions = {
-      address: filecoinPayContractA,
-      token: usdfcToken.address,
+      filecoinPayContract: filecoinPayContractA,
+      token: usdfcToken,
       payee: zeroAddress,
       validator: zeroAddress,
     } as const;
 
-    const rail1 = {
-      railId: 1n,
-      payer: payerA,
-      operator: operatorA,
-    } as const;
-
-    const rail2 = {
-      railId: 2n,
-      payer: payerA,
-      operator: operatorB,
-    };
-
-    const rail3 = {
-      railId: 3n,
-      payer: payerA,
-      operator: operatorC,
-    } as const;
-
-    const rail4 = {
-      railId: 4n,
-      payer: payerB,
-      operator: operatorA,
-    };
-
-    const rail5 = {
-      railId: 5n,
-      payer: payerB,
-      operator: operatorB,
-    };
-
-    const railCreationLogs = [rail1, rail2, rail3, rail4, rail5].map(
-      (rail, index) => {
-        return railCreatedLog({
-          ...commonRailOptions,
-          ...rail,
-          blockNumber: 2n,
-          logIndex: index,
-        });
+    const [railOne, railTwo, railThree, railFour, railFive] = [
+      {
+        payer: payerA,
+        operator: operatorA,
       },
-    );
+      {
+        payer: payerA,
+        operator: operatorB,
+      },
+      {
+        payer: payerA,
+        operator: operatorC,
+      },
+      {
+        payer: payerB,
+        operator: operatorA,
+      },
+      {
+        payer: payerB,
+        operator: operatorB,
+      },
+    ].map((railInput, index) => {
+      return rail({
+        ...commonRailOptions,
+        ...railInput,
+        railId: BigInt(index + 1),
+      });
+    });
 
-    testFilecoinClient.resetWithLogs([
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 0n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorB,
-        wallet: orchestratorB,
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 4,
-        orchestrator: orchestratorC,
-        wallet: orchestratorC,
-      }),
-      ...railCreationLogs,
+    testFilecoinClient.reset([
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 0n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorB,
+          wallet: orchestratorB,
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorC,
+          wallet: orchestratorC,
+        }),
+        ...[railOne, railTwo, railThree, railFour, railFive].map((r) =>
+          r.railCreatedTx(),
+        ),
+      ]),
 
       // Case 1: Bound to A -> settlement 1 -> reassignment to B without inherit
       // -> settlement 2, all in one epoch. Default non malicient reassignment.
       // Settlment 1 should count towards A's Q1 volume and settlment 2 towards
       // B's Q1 volume.
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch,
-        logIndex: 0,
-        orchestrator: orchestratorA,
-        operator: rail1.operator,
-        payer: rail1.payer,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 1,
-        railId: rail1.railId,
-        totalSettledAmount: usdfcToken.formatNumericValue(1),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      bindingReassignedLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch,
-        logIndex: 2,
-        orchestrator: orchestratorB,
-        operator: rail1.operator,
-        payer: rail1.payer,
-        inherit: false,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 3,
-        railId: rail1.railId,
-        totalSettledAmount: usdfcToken.formatNumericValue(2),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(2),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q1.startEpoch, [
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: railOne.operator,
+          payer: railOne.payer,
+        }),
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 1,
+        }),
+        bindingReassignedTx({
+          orchestrator: orchestratorB,
+          operator: railOne.operator,
+          payer: railOne.payer,
+          inherit: false,
+        }),
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 2,
+        }),
+      ]),
 
       // Case 2: Bound to A -> settlement 1 -> reassignment to B with inherit
       // -> settlement 2, all in one epoch. Default malicient reassignment.
       // Both settlment 1 and settlment 2 should count towards B's Q1 volume.
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 0,
-        orchestrator: orchestratorA,
-        operator: rail2.operator,
-        payer: rail2.payer,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 1,
-        railId: rail2.railId,
-        totalSettledAmount: usdfcToken.formatNumericValue(10),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(10),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      bindingReassignedLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 2,
-        orchestrator: orchestratorB,
-        operator: rail2.operator,
-        payer: rail2.payer,
-        inherit: true,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 3,
-        railId: rail2.railId,
-        totalSettledAmount: usdfcToken.formatNumericValue(20),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(20),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q1.startEpoch + 1n, [
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: railTwo.operator,
+          payer: railTwo.payer,
+        }),
+        railTwo.railSettledTx({
+          settledUpTo: q1.startEpoch + 1n,
+          totalNetPayeeAmount: 10,
+        }),
+        bindingReassignedTx({
+          orchestrator: orchestratorB,
+          operator: railTwo.operator,
+          payer: railTwo.payer,
+          inherit: true,
+        }),
+        railTwo.railSettledTx({
+          settledUpTo: q1.startEpoch + 1n,
+          totalNetPayeeAmount: 20,
+        }),
+      ]),
 
       // Case 3: Bound to A in Q1 -> settlement 1 in Q2 -> reassigned to B with
       // inherit -> settlement 2. Special pair held longer case. Settlment 1
       // should count towards A's Q2 volume and settlment 2 towards B's Q2
       // volume.
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 2n,
-        logIndex: 0,
-        orchestrator: orchestratorA,
-        operator: rail3.operator,
-        payer: rail3.payer,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q2.startEpoch + 2n,
-        logIndex: 1,
-        railId: rail3.railId,
-        totalSettledAmount: usdfcToken.formatNumericValue(100),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(100),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      bindingReassignedLog({
-        address: serviceRewardsActor,
-        blockNumber: q2.startEpoch + 2n,
-        logIndex: 2,
-        orchestrator: orchestratorB,
-        operator: rail3.operator,
-        payer: rail3.payer,
-        inherit: true,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q2.startEpoch + 2n,
-        logIndex: 3,
-        railId: rail3.railId,
-        totalSettledAmount: usdfcToken.formatNumericValue(200),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(200),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q1.startEpoch + 2n, [
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: railThree.operator,
+          payer: railThree.payer,
+        }),
+      ]),
+      block(q2.startEpoch + 2n, [
+        railThree.railSettledTx({
+          settledUpTo: q2.startEpoch + 2n,
+          totalNetPayeeAmount: 100,
+        }),
+        bindingReassignedTx({
+          orchestrator: orchestratorB,
+          operator: railThree.operator,
+          payer: railThree.payer,
+          inherit: true,
+        }),
+        railThree.railSettledTx({
+          settledUpTo: q2.startEpoch + 2n,
+          totalNetPayeeAmount: 200,
+        }),
+      ]),
 
       // Case 4: Bound to C -> settlement 1 -> released -> bound to A ->
       // settlement 2 -> reassigned to B with inherit -> settlement 3 all in one
       // epoch. Maleficient reassignment honoring previous bindings.
       // Settlement 1 should count towards C's volume, settlments 2 and 3
       // towards B's volume, A gets nothing.
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 3n,
-        logIndex: 0,
-        orchestrator: orchestratorC,
-        operator: rail4.operator,
-        payer: rail4.payer,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 3n,
-        logIndex: 1,
-        railId: rail4.railId,
-        totalSettledAmount: usdfcToken.formatNumericValue(3000),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(3000),
-        networkFee: 0n,
-        operatorCommission: 0n,
-      }),
-      bindingCanceledLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 3n,
-        logIndex: 2,
-        payer: rail4.payer,
-        operator: rail4.operator,
-        orchestrator: orchestratorC,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 3n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        operator: rail4.operator,
-        payer: rail4.payer,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 3n,
-        logIndex: 4,
-        railId: rail4.railId,
-        totalSettledAmount: usdfcToken.formatNumericValue(1000),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1000),
-        networkFee: 0n,
-        operatorCommission: 0n,
-      }),
-      bindingReassignedLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 3n,
-        logIndex: 5,
-        orchestrator: orchestratorB,
-        operator: rail4.operator,
-        payer: rail4.payer,
-        inherit: true,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 3n,
-        logIndex: 6,
-        railId: rail4.railId,
-        totalSettledAmount: usdfcToken.formatNumericValue(2000),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(2000),
-        networkFee: 0n,
-        operatorCommission: 0n,
-      }),
+      block(q1.startEpoch + 3n, [
+        bindingDeclaredTx({
+          orchestrator: orchestratorC,
+          operator: railFour.operator,
+          payer: railFour.payer,
+        }),
+        railFour.railSettledTx({
+          settledUpTo: q1.startEpoch + 3n,
+          totalNetPayeeAmount: 3000,
+        }),
+        bindingCanceledTx({
+          payer: railFour.payer,
+          operator: railFour.operator,
+          orchestrator: orchestratorC,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: railFour.operator,
+          payer: railFour.payer,
+        }),
+        railFour.railSettledTx({
+          settledUpTo: q1.startEpoch + 3n,
+          totalNetPayeeAmount: 1000,
+        }),
+        bindingReassignedTx({
+          orchestrator: orchestratorB,
+          operator: railFour.operator,
+          payer: railFour.payer,
+          inherit: true,
+        }),
+        railFour.railSettledTx({
+          settledUpTo: q1.startEpoch + 3n,
+          totalNetPayeeAmount: 2000,
+        }),
+      ]),
 
       // Case 5: Settlement 1 in Q1 -> bound to A during Q1 cutoff -> reassigned
       // to B during Q1 cutoff with inherit -> settlement 2 in Q2. No one should
       // get settlement 1 and settlement 2 should count towards B's Q2 volume.
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.endEpoch,
-        logIndex: 0,
-        railId: rail5.railId,
-        totalSettledAmount: usdfcToken.formatNumericValue(10000),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(10000),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.endEpoch,
-        logIndex: 1,
-        orchestrator: orchestratorA,
-        operator: rail5.operator,
-        payer: rail5.payer,
-      }),
-      bindingReassignedLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.endEpoch,
-        logIndex: 2,
-        orchestrator: orchestratorB,
-        operator: rail5.operator,
-        payer: rail5.payer,
-        inherit: true,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q2.startEpoch + 4n,
-        logIndex: 0,
-        railId: rail5.railId,
-        totalSettledAmount: usdfcToken.formatNumericValue(20000),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(20000),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q1.endEpoch, [
+        railFive.railSettledTx({
+          settledUpTo: q1.endEpoch,
+          totalNetPayeeAmount: 10000,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: railFive.operator,
+          payer: railFive.payer,
+        }),
+        bindingReassignedTx({
+          orchestrator: orchestratorB,
+          operator: railFive.operator,
+          payer: railFive.payer,
+          inherit: true,
+        }),
+      ]),
+      block(q2.startEpoch + 4n, [
+        railFive.railSettledTx({
+          settledUpTo: q2.startEpoch + 4n,
+          totalNetPayeeAmount: 20000,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q2.endEpoch + 1n);
@@ -1897,108 +2071,76 @@ describe('FIP-0118 adherence test', () => {
   it('Attributes volume properly after binding cancellation', async () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
 
-    testFilecoinClient.resetWithLogs([
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 0n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorB,
-        wallet: orchestratorB,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch,
-        logIndex: 0,
-        orchestrator: orchestratorA,
-        operator: operatorA,
-        payer: payerA,
-      }),
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+
+    testFilecoinClient.reset([
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 0n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorB,
+          wallet: orchestratorB,
+        }),
+        railOne.railCreatedTx(),
+      ]),
+
+      block(q1.startEpoch, [
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          operator: operatorA,
+          payer: payerA,
+        }),
+      ]),
 
       // Settlement before cancellation attributed to A
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(1n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      bindingCanceledLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 1,
-        orchestrator: orchestratorA,
-        operator: operatorA,
-        payer: payerA,
-      }),
-      // Unbound settlement
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 2,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(10n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(10n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      // B binds released pair
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 3,
-        orchestrator: orchestratorB,
-        operator: operatorA,
-        payer: payerA,
-      }),
-      // Settlement bound to B
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 4,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(100n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(100n),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
+      block(q1.startEpoch + 1n, [
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch + 1n,
+          totalNetPayeeAmount: 1,
+        }),
+        bindingCanceledTx({
+          orchestrator: orchestratorA,
+          operator: operatorA,
+          payer: payerA,
+        }),
+        // Unbound settlement
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch + 1n,
+          totalNetPayeeAmount: 10,
+        }),
+        // B binds released pair
+        bindingDeclaredTx({
+          orchestrator: orchestratorB,
+          operator: operatorA,
+          payer: payerA,
+        }),
+        // Settlement bound to B
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch + 1n,
+          totalNetPayeeAmount: 100,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q1.endEpoch + 1n);
@@ -2031,117 +2173,102 @@ describe('FIP-0118 adherence test', () => {
   it('Matches prints strictly after settlement', async () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
 
-    const transfers = range(0, 8).map((index) => {
-      return transferLog({
-        address: usdfcToken.address,
-        blockNumber: index >= 5 ? q1.startEpoch + 1n : q1.startEpoch,
-        logIndex: index >= 5 ? 2 * (index % 5) : index,
-        from: filecoinPayContractA,
-        to: payerA,
-        value: usdfcToken.formatNumericValue(10 + index),
-      });
-    });
-
-    const transactions = transfers.map((transfer) => {
-      return burnForFeesTransaction({
-        hash: transfer.transactionHash,
-        recipient: transfer.args.to,
-        requested: transfer.args.value,
-        token: transfer.address,
-        value: filToken.formatNumericValue(1n),
-      });
-    });
-
-    const logs = [
-      // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: filToken.formatNumericValue('0.5'),
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 400n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        payer: payerA,
-        operator: operatorA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: filToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-
-      // Rail to seed auctionable tokens indexing
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 5,
-        railId: 2n,
+    const seeds = range(0, 5).map((index) => {
+      return burnForFeesTx({
+        filecoinPayContract: filecoinPayContractA,
+        recipient: payerA,
+        requested: usdfcToken.formatNumericValue(10 + index),
         token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+        value: filToken.formatNumericValue(1),
+      });
+    });
+
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: filToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+
+    testFilecoinClient.reset([
+      // bootstrap
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: filToken.formatNumericValue('0.5'),
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 400n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          payer: payerA,
+          operator: operatorA,
+        }),
+        railOne.railCreatedTx(),
+
+        // Rail to seed auctionable tokens indexing
+        rail({
+          filecoinPayContract: filecoinPayContractA,
+          railId: 2n,
+          token: usdfcToken,
+          payee: zeroAddress,
+          payer: payerA,
+          operator: operatorA,
+          validator: zeroAddress,
+        }).railCreatedTx(),
+      ]),
 
       // Q1 events
-      ...transfers,
+      block(q1.startEpoch, seeds),
+      block(q1.startEpoch + 1n, [
+        burnForFeesTx({
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: usdfcToken.formatNumericValue(15),
+          token: usdfcToken.address,
+          value: filToken.formatNumericValue(1),
+        }),
+        // Settlement after 2nd price period but before last price period
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch + 1n,
+          totalNetPayeeAmount: 10,
+        }),
+        burnForFeesTx({
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: usdfcToken.formatNumericValue(16),
+          token: usdfcToken.address,
+          value: filToken.formatNumericValue(1),
+        }),
+        burnForFeesTx({
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: usdfcToken.formatNumericValue(17),
+          token: usdfcToken.address,
+          value: filToken.formatNumericValue(1),
+        }),
 
-      // Settlement after 1st price period but before second price period
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 1,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(10n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(9n),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue(1n),
-      }),
+        // Settlement after last price period (should not be counted)
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch + 1n,
+          totalNetPayeeAmount: 1000,
+        }),
+      ]),
+    ]);
 
-      // Settlement after last price period (should not be counted)
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 5,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(1000n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(900n),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue(100n),
-      }),
-    ];
-
-    testFilecoinClient.resetWithLogs(logs, transactions);
     testFilecoinClient.forwardTo(q1.endEpoch + 1n);
-
     await app.get(IndexerOrchestratorService).execute();
 
     const response = await request(app.getHttpServer())
@@ -2188,129 +2315,103 @@ describe('FIP-0118 adherence test', () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
     const q2 = await app.get(QuartersService).getQuarterByIndex(2);
 
-    const seedTransfers = range(0, 5).map((index) => {
-      return transferLog({
-        address: usdfcToken.address,
-        blockNumber: q1.startEpoch,
-        logIndex: index,
-        from: filecoinPayContractA,
-        to: payerA,
-        value: usdfcToken.formatNumericValue(10 + index),
-      });
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: filToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
     });
 
-    const q1TransferLog = transferLog({
-      address: usdfcToken.address,
-      blockNumber: q1.startEpoch + 1n,
-      logIndex: 0,
-      from: filecoinPayContractA,
-      to: payerA,
-      value: usdfcToken.formatNumericValue(15n),
-    });
-
-    const q2TransferLog = transferLog({
-      address: usdfcToken.address,
-      blockNumber: q2.startEpoch + 1n,
-      logIndex: 0,
-      from: filecoinPayContractA,
-      to: payerA,
-      value: usdfcToken.formatNumericValue(16n),
-    });
-
-    const transactions = [...seedTransfers, q1TransferLog, q2TransferLog].map(
-      (transfer) => {
-        return burnForFeesTransaction({
-          hash: transfer.transactionHash,
-          recipient: transfer.args.to,
-          requested: transfer.args.value,
-          token: transfer.address,
-          value: filToken.formatNumericValue(1n),
-        });
-      },
-    );
-
-    const logs = [
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: filToken.formatNumericValue('0.5'),
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 400n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        payer: payerA,
-        operator: operatorA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: filToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: filToken.formatNumericValue('0.5'),
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 400n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          payer: payerA,
+          operator: operatorA,
+        }),
+        railOne.railCreatedTx(),
 
-      // Rail to seed auctionable tokens indexing
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 5,
-        railId: 2n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+        // Rail to seed auctionable tokens indexing
+        rail({
+          filecoinPayContract: filecoinPayContractA,
+          railId: 2n,
+          token: usdfcToken,
+          payee: zeroAddress,
+          payer: payerA,
+          operator: operatorA,
+          validator: zeroAddress,
+        }).railCreatedTx(),
+      ]),
 
       // Q1 events
-      ...seedTransfers,
-      q1TransferLog,
+      // seed
+      block(
+        q1.startEpoch,
+        range(0, 5).map((index) => {
+          return burnForFeesTx({
+            token: usdfcToken.address,
+            filecoinPayContract: filecoinPayContractA,
+            recipient: payerA,
+            requested: usdfcToken.formatNumericValue(10 + index),
+            value: filToken.formatNumericValue(1n),
+          });
+        }),
+      ),
 
-      // Settlement after last Q1 price period should be counted in Q2
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 2n,
-        logIndex: 1,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(10n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(9n),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue(1n),
-      }),
+      block(q1.startEpoch + 1n, [
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: usdfcToken.formatNumericValue(15),
+          value: filToken.formatNumericValue(1n),
+        }),
+      ]),
+
+      block(q1.startEpoch + 2n, [
+        // Settlement after last Q1 price period should be counted in Q2
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch + 2n,
+          totalNetPayeeAmount: 10,
+        }),
+      ]),
 
       // Q2 events
-      q2TransferLog,
-    ];
+      block(q2.startEpoch + 1n, [
+        sharesSubmittedTx({
+          q: 1n,
+          totalUsd: 0n,
+        }),
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: usdfcToken.formatNumericValue(16),
+          value: filToken.formatNumericValue(1n),
+        }),
+      ]),
+    ]);
 
-    testFilecoinClient.resetWithLogs(logs, transactions);
     testFilecoinClient.forwardTo(q2.endEpoch + 1n);
-
     await app.get(IndexerOrchestratorService).execute();
 
     const responseQ1 = await request(app.getHttpServer())
@@ -2362,104 +2463,75 @@ describe('FIP-0118 adherence test', () => {
   it('Seed prints do not price volume', async () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
 
-    const transfers = range(0, 6).map((index) => {
-      return transferLog({
-        address: usdfcToken.address,
-        blockNumber: q1.startEpoch + 1n + BigInt(index),
-        logIndex: 0,
-        from: filecoinPayContractA,
-        to: payerA,
-        value: usdfcToken.formatNumericValue(10 + index),
-      });
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: filToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
     });
 
-    const transactions = transfers.map((transfer) => {
-      return burnForFeesTransaction({
-        hash: transfer.transactionHash,
-        recipient: transfer.args.to,
-        requested: transfer.args.value,
-        token: transfer.address,
-        value: filToken.formatNumericValue(1n),
-      });
-    });
-
-    const logs = [
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: filToken.formatNumericValue('0.5'),
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 400n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        payer: payerA,
-        operator: operatorA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: filToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: filToken.formatNumericValue('0.5'),
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 400n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          payer: payerA,
+          operator: operatorA,
+        }),
+        railOne.railCreatedTx(),
 
-      // Rail to seed auctionable tokens indexing
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 5,
-        railId: 2n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+        // Rail to seed auctionable tokens indexing
+        rail({
+          filecoinPayContract: filecoinPayContractA,
+          railId: 2n,
+          token: usdfcToken,
+          payee: zeroAddress,
+          payer: payerA,
+          operator: operatorA,
+          validator: zeroAddress,
+        }).railCreatedTx(),
+      ]),
 
       // Settlement before seed prints that should not be priced by them
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(10n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(9n),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue(1n),
+      block(q1.startEpoch, [
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 10,
+        }),
+      ]),
+
+      ...range(0, 6).map((index) => {
+        return block(q1.startEpoch + 1n + BigInt(index), [
+          burnForFeesTx({
+            filecoinPayContract: filecoinPayContractA,
+            token: usdfcToken.address,
+            recipient: payerA,
+            requested: usdfcToken.formatNumericValue(10 + index),
+            value: filToken.formatNumericValue(1),
+          }),
+        ]);
       }),
+    ]);
 
-      ...transfers,
-    ];
-
-    testFilecoinClient.resetWithLogs(logs, transactions);
     testFilecoinClient.forwardTo(q1.endEpoch + 1n);
-
     await app.get(IndexerOrchestratorService).execute();
 
     const response = await request(app.getHttpServer())
@@ -2491,142 +2563,105 @@ describe('FIP-0118 adherence test', () => {
     const priceBandBps = 0n;
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
 
-    const seedTransfers = range(0, 5).map((index) => {
-      return transferLog({
-        address: usdfcToken.address,
-        blockNumber: q1.startEpoch,
-        logIndex: index,
-        from: filecoinPayContractA,
-        to: payerA,
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: filToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+
+    const auctionBaseValue = filToken.formatNumericValue(1);
+    const seedAuctions = range(0, 5).map((index) => {
+      return burnForFeesTx({
+        filecoinPayContract: filecoinPayContractA,
+        token: usdfcToken.address,
+        recipient: payerA,
+        value: auctionBaseValue,
 
         // Ratios 1, 2, 3, 4, 100. Artifically high ratio on last print.
         // Arithemtic mean is 22 but median by comparsion is 3 (middle item).
-        value:
+        requested:
           index === 4
             ? usdfcToken.formatNumericValue(100n)
             : usdfcToken.formatNumericValue(index + 1),
       });
     });
 
-    const nonQualifyingTransfer = transferLog({
-      address: usdfcToken.address,
-      // After settlement on block start + 1
-      blockNumber: q1.startEpoch + 2n,
-      logIndex: 0,
-      from: filecoinPayContractA,
-      to: payerA,
+    const nonQualifyingAuction = burnForFeesTx({
+      filecoinPayContract: filecoinPayContractA,
+      token: usdfcToken.address,
+      recipient: payerA,
+      value: auctionBaseValue,
       // Value of 22 would pass decimal median price band but should fail here
       // with price band of 0% (exact median)
-      value: usdfcToken.formatNumericValue(22n),
+      requested: usdfcToken.formatNumericValue(22n),
     });
 
-    const qualifyingTransfer = transferLog({
-      address: usdfcToken.address,
-      // After settlement on block start + 1
-      blockNumber: q1.startEpoch + 2n,
-      logIndex: 1,
-      from: filecoinPayContractA,
-      to: payerA,
+    const qualifyingAuction = burnForFeesTx({
+      filecoinPayContract: filecoinPayContractA,
+      token: usdfcToken.address,
+      recipient: payerA,
+      value: auctionBaseValue,
       // Value of 3 would fail decimal median price band but should pass here
       // with price band of 0% (exact median)
-      value: usdfcToken.formatNumericValue(3n),
+      requested: usdfcToken.formatNumericValue(3n),
     });
 
-    const transactions = [
-      ...seedTransfers,
-      nonQualifyingTransfer,
-      qualifyingTransfer,
-    ].map((transfer) => {
-      return burnForFeesTransaction({
-        hash: transfer.transactionHash,
-        recipient: transfer.args.to,
-        requested: transfer.args.value,
-        token: transfer.address,
-        value: filToken.formatNumericValue(1n),
-      });
-    });
-
-    const logs = [
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 400n,
-        priceBand: priceBandBps,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        payer: payerA,
-        operator: operatorA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: filToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 400n,
+          priceBand: priceBandBps,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          payer: payerA,
+          operator: operatorA,
+        }),
+        railOne.railCreatedTx(),
 
-      // Rail to seed auctionable tokens indexing
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 5,
-        railId: 2n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+        // Rail to seed auctionable tokens indexing
+        rail({
+          filecoinPayContract: filecoinPayContractA,
+          railId: 2n,
+          token: usdfcToken,
+          payee: zeroAddress,
+          payer: payerA,
+          operator: operatorA,
+          validator: zeroAddress,
+        }).railCreatedTx(),
+      ]),
 
       // Q1 events
-      ...seedTransfers,
+      block(q1.startEpoch, seedAuctions),
 
       // Settlement before price band checked prints
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 0,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(10n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(9n),
-        operatorCommission: 0n,
-        networkFee: usdfcToken.formatNumericValue(1n),
-      }),
+      block(q1.startEpoch + 1n, [
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch + 1n,
+          totalNetPayeeAmount: 10,
+        }),
+      ]),
 
-      nonQualifyingTransfer,
-      qualifyingTransfer,
-    ];
+      block(q1.startEpoch + 2n, [nonQualifyingAuction, qualifyingAuction]),
+    ]);
 
-    testFilecoinClient.resetWithLogs(logs, transactions);
     testFilecoinClient.forwardTo(q1.endEpoch + 1n);
-
     await app.get(IndexerOrchestratorService).execute();
 
     const response = await request(app.getHttpServer())
@@ -2664,198 +2699,156 @@ describe('FIP-0118 adherence test', () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
     const q2 = await app.get(QuartersService).getQuarterByIndex(2);
 
-    const transferLogs = [
+    const auctionBaseValue = filToken.formatNumericValue(1n);
+
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: filToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+
+    const railTwo = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 2n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+
+    testFilecoinClient.reset([
+      // bootstrap
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor,
+          minLotAlphaDen,
+          minLotAlphaNum,
+          priceBand: priceBandBps,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          payer: payerA,
+          operator: operatorA,
+        }),
+        railOne.railCreatedTx(),
+        railTwo.railCreatedTx(),
+      ]),
+
       // Q1
+      block(q1.startEpoch, [
+        // Settlements before prints, 300USD for Q1 volume and 10FIL to test
+        // pricing in Q2
+        railTwo.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 300,
+        }),
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 10,
+        }),
+      ]),
 
-      // All 3 clear min lot floor
-      transferLog({
-        address: usdfcToken.address,
-        // After settlement on Q1 start
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 0,
-        from: filecoinPayContractA,
-        to: payerA,
-        value: usdfcToken.formatNumericValue(6n),
-      }),
-      transferLog({
-        address: usdfcToken.address,
-        // After settlement on Q1 start
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 1,
-        from: filecoinPayContractA,
-        to: payerA,
-        value: usdfcToken.formatNumericValue(8n),
-      }),
-      transferLog({
-        address: usdfcToken.address,
-        // After settlement on Q1 start
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 2,
-        from: filecoinPayContractA,
-        to: payerA,
-        value: usdfcToken.formatNumericValue(4n),
-      }),
+      block(q1.startEpoch + 1n, [
+        // All 3 clear min lot floor
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          value: auctionBaseValue,
+          requested: usdfcToken.formatNumericValue(6n),
+        }),
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          value: auctionBaseValue,
+          requested: usdfcToken.formatNumericValue(8n),
+        }),
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          value: auctionBaseValue,
+          requested: usdfcToken.formatNumericValue(4n),
+        }),
 
-      // Below min lot floor, no min lot yet for Q1
-      transferLog({
-        address: usdfcToken.address,
-        // After settlement on Q1 start
-        blockNumber: q1.startEpoch + 1n,
-        logIndex: 3,
-        from: filecoinPayContractA,
-        to: payerA,
-        value: usdfcToken.formatNumericValue(1n),
-      }),
+        // Below min lot floor, no min lot yet for Q1
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          value: auctionBaseValue,
+          requested: usdfcToken.formatNumericValue(1n),
+        }),
+      ]),
 
       // Q2. We still don't have 5 seed auctions. Min lot now calculated based
       // on Q1 volume and params, should be 10USD (300 * (1 / 10) / 3)
 
-      // Below new min lot
-      transferLog({
-        address: usdfcToken.address,
-        blockNumber: q2.startEpoch,
-        logIndex: 0,
-        from: filecoinPayContractA,
-        to: payerA,
-        // Below 10USD
-        value: usdfcToken.formatNumericValue(9n),
-      }),
+      block(q2.startEpoch, [
+        // Below new min lot
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          value: auctionBaseValue,
+          // Below 10USD
+          requested: usdfcToken.formatNumericValue(9n),
+        }),
 
-      // Both clear new min lot
-      transferLog({
-        address: usdfcToken.address,
-        blockNumber: q2.startEpoch,
-        logIndex: 1,
-        from: filecoinPayContractA,
-        to: payerA,
-        value: usdfcToken.formatNumericValue(10n),
-      }),
-      transferLog({
-        address: usdfcToken.address,
-        blockNumber: q2.startEpoch,
-        logIndex: 2,
-        from: filecoinPayContractA,
-        to: payerA,
-        value: usdfcToken.formatNumericValue(12n),
-      }),
+        // Both clear new min lot
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          value: auctionBaseValue,
+          requested: usdfcToken.formatNumericValue(10n),
+        }),
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          value: auctionBaseValue,
+          requested: usdfcToken.formatNumericValue(12n),
+        }),
+      ]),
 
-      // First qualifying print after seed, median should be 8.
-      // Check by using same price with 0% price band.
-      transferLog({
-        address: usdfcToken.address,
-        blockNumber: q2.startEpoch + 1n,
-        logIndex: 0,
-        from: filecoinPayContractA,
-        to: payerA,
-        // Exact seed median
-        value: usdfcToken.formatNumericValue(8n),
-      }),
-    ];
+      block(q2.startEpoch + 1n, [
+        // First qualifying print after seed, median should be 8.
+        // Check by using same price with 0% price band.
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          value: auctionBaseValue,
+          // Exact seed median
+          requested: usdfcToken.formatNumericValue(8n),
+        }),
+      ]),
 
-    const transactions = transferLogs.map((transfer) => {
-      return burnForFeesTransaction({
-        hash: transfer.transactionHash,
-        recipient: transfer.args.to,
-        requested: transfer.args.value,
-        token: transfer.address,
-        value: filToken.formatNumericValue(1n),
-      });
-    });
+      block(q2.startEpoch + 2n, [
+        sharesSubmittedTx({
+          q: 1n,
+          totalUsd: filToken.formatNumericValue(300n),
+        }),
+      ]),
+    ]);
 
-    const logs = [
-      // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor,
-        minLotAlphaDen,
-        minLotAlphaNum,
-        priceBand: priceBandBps,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        payer: payerA,
-        operator: operatorA,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: filToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 5,
-        railId: 2n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
-
-      // Settlements before prints, 300USD for Q1 volume and 10FIL to test
-      // pricing in Q2
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 0,
-        railId: 2n,
-        totalSettledAmount: usdfcToken.formatNumericValue(300n),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(240n),
-        networkFee: usdfcToken.formatNumericValue(60n),
-        operatorCommission: 0n,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 1,
-        railId: 1n,
-        totalSettledAmount: filToken.formatNumericValue(10n),
-        totalNetPayeeAmount: filToken.formatNumericValue(9n),
-        networkFee: filToken.formatNumericValue(1n),
-        operatorCommission: 0n,
-      }),
-
-      ...transferLogs,
-
-      sharesSubmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: q2.startEpoch + 2n,
-        logIndex: 0,
-        q: 1n,
-        totalUsd: filToken.formatNumericValue(300n),
-      }),
-    ];
-
-    testFilecoinClient.resetWithLogs(logs, transactions);
     testFilecoinClient.forwardTo(q2.endEpoch + 1n);
-
     await app.get(IndexerOrchestratorService).execute();
 
     const responseQ1 = await request(app.getHttpServer())
@@ -2905,177 +2898,136 @@ describe('FIP-0118 adherence test', () => {
     const upperPriceBand = usdfcToken.formatNumericValue(13);
     const lowerPriceBand = usdfcToken.formatNumericValue(7);
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
+    const auctionBaseValue = filToken.formatNumericValue(1n);
 
-    const usdfcRailLog = railCreatedLog({
-      address: filecoinPayContractA,
-      blockNumber: 1n,
-      logIndex: 4,
+    const usdfcRail = rail({
+      filecoinPayContract: filecoinPayContractA,
       railId: 1n,
-      token: filToken.address,
+      token: filToken,
       payee: zeroAddress,
       payer: payerA,
       operator: operatorA,
       validator: zeroAddress,
     });
 
-    const seedAuctions = range(0, 5).map((index) => {
-      return transferLog({
-        address: usdfcToken.address,
-        blockNumber: q1.startEpoch,
-        logIndex: index,
-        from: filecoinPayContractA,
-        to: payerA,
-        value: usdfcToken.formatNumericValue(initialLotUsd),
-      });
-    });
-
-    const beforeUpperPriceBandSettlement = railSettledLog({
-      address: filecoinPayContractA,
-      blockNumber: q1.startEpoch + 1n,
-      logIndex: 0,
-      railId: usdfcRailLog.args.railId,
-      totalSettledAmount: usdfcToken.formatNumericValue(100n),
-      totalNetPayeeAmount: usdfcToken.formatNumericValue(90n),
-      operatorCommission: 0n,
-      networkFee: usdfcToken.formatNumericValue(10n),
-    });
-
-    const aboveUpperPriceBandAuction = transferLog({
-      address: usdfcToken.address,
-      blockNumber: beforeUpperPriceBandSettlement.blockNumber + 1n,
-      logIndex: 0,
-      from: filecoinPayContractA,
-      to: payerA,
-      value: upperPriceBand + 1n,
-    });
-
-    const upperPriceBandAuction = transferLog({
-      address: usdfcToken.address,
-      blockNumber: aboveUpperPriceBandAuction.blockNumber,
-      logIndex: aboveUpperPriceBandAuction.logIndex + 1,
-      from: filecoinPayContractA,
-      to: payerA,
-      value: upperPriceBand,
-    });
-
-    const resetAuction = transferLog({
-      address: usdfcToken.address,
-      blockNumber: upperPriceBandAuction.blockNumber,
-      logIndex: upperPriceBandAuction.logIndex + 1,
-      from: filecoinPayContractA,
-      to: payerA,
-      value: usdfcToken.formatNumericValue(initialLotUsd),
-    });
-
-    const beforeLowerPriceBandSettlement = railSettledLog({
-      address: filecoinPayContractA,
-      blockNumber: resetAuction.blockNumber + 1n,
-      logIndex: 0,
-      railId: usdfcRailLog.args.railId,
-      totalSettledAmount: usdfcToken.formatNumericValue(1000n),
-      totalNetPayeeAmount: usdfcToken.formatNumericValue(900n),
-      operatorCommission: 0n,
-      networkFee: usdfcToken.formatNumericValue(100n),
-    });
-
-    const belowLowerPriceBandAuction = transferLog({
-      address: usdfcToken.address,
-      blockNumber: beforeLowerPriceBandSettlement.blockNumber + 1n,
-      logIndex: 0,
-      from: filecoinPayContractA,
-      to: payerA,
-      value: lowerPriceBand - 1n,
-    });
-
-    const lowerPriceBandAuction = transferLog({
-      address: usdfcToken.address,
-      blockNumber: beforeLowerPriceBandSettlement.blockNumber + 1n,
-      logIndex: 0,
-      from: filecoinPayContractA,
-      to: payerA,
-      value: lowerPriceBand,
-    });
-
-    const logs = [
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 400n,
-        priceBand: priceBandBps,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        payer: payerA,
-        operator: operatorA,
-      }),
-      usdfcRailLog,
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 400n,
+          priceBand: priceBandBps,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          payer: payerA,
+          operator: operatorA,
+        }),
+        usdfcRail.railCreatedTx(),
 
-      // Rail to seed auctionable tokens indexing
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 5,
-        railId: 2n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+        // Rail to seed auctionable tokens indexing
+        rail({
+          filecoinPayContract: filecoinPayContractA,
+          railId: 2n,
+          token: usdfcToken,
+          payee: zeroAddress,
+          payer: payerA,
+          operator: operatorA,
+          validator: zeroAddress,
+        }).railCreatedTx(),
+      ]),
 
       // Q1 events
-      ...seedAuctions,
-      beforeUpperPriceBandSettlement,
-      aboveUpperPriceBandAuction,
-      upperPriceBandAuction,
-      resetAuction,
-      beforeLowerPriceBandSettlement,
-      belowLowerPriceBandAuction,
-      lowerPriceBandAuction,
-    ];
+      block(
+        q1.startEpoch,
+        range(0, 5).map(() => {
+          return burnForFeesTx({
+            token: usdfcToken.address,
+            filecoinPayContract: filecoinPayContractA,
+            recipient: payerA,
+            requested: usdfcToken.formatNumericValue(initialLotUsd),
+            value: auctionBaseValue,
+          });
+        }),
+      ),
 
-    const transactions = [
-      ...seedAuctions,
-      aboveUpperPriceBandAuction,
-      upperPriceBandAuction,
-      resetAuction,
-      belowLowerPriceBandAuction,
-      lowerPriceBandAuction,
-    ].map((transfer) => {
-      return burnForFeesTransaction({
-        hash: transfer.transactionHash,
-        recipient: transfer.args.to,
-        requested: transfer.args.value,
-        token: transfer.address,
-        value: filToken.formatNumericValue(1n),
-      });
-    });
+      // Before upper price band settlement
+      block(q1.startEpoch + 1n, [
+        usdfcRail.railSettledTx({
+          settledUpTo: q1.startEpoch + 1n,
+          totalNetPayeeAmount: 100,
+        }),
+      ]),
 
-    testFilecoinClient.resetWithLogs(logs, transactions);
+      block(q1.startEpoch + 2n, [
+        // Above upper price band auction
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: upperPriceBand + 1n,
+          value: auctionBaseValue,
+        }),
+
+        // Upper price band auction
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: upperPriceBand,
+          value: auctionBaseValue,
+        }),
+
+        // Reset auction
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: usdfcToken.formatNumericValue(initialLotUsd),
+          value: auctionBaseValue,
+        }),
+      ]),
+
+      block(q1.startEpoch + 3n, [
+        // Before lower price band settlement
+        usdfcRail.railSettledTx({
+          settledUpTo: q1.startEpoch + 3n,
+          totalNetPayeeAmount: 1000,
+        }),
+      ]),
+
+      block(q1.startEpoch + 4n, [
+        // Below lower price band auction
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: lowerPriceBand - 1n,
+          value: auctionBaseValue,
+        }),
+
+        // Lower price band auction
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: lowerPriceBand,
+          value: auctionBaseValue,
+        }),
+      ]),
+    ]);
+
     testFilecoinClient.forwardTo(q1.endEpoch + 1n);
-
     await app.get(IndexerOrchestratorService).execute();
 
     const response = await request(app.getHttpServer())
@@ -3124,236 +3076,134 @@ describe('FIP-0118 adherence test', () => {
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
     const auctionClaim = filToken.formatNumericValue(1n);
 
-    testFilecoinClient.resetWithLogs([
+    testFilecoinClient.reset([
       // bootstrap
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 400n,
-        priceBand: 10000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA, filecoinPayContractB],
-        stablecoins: [usdfcToken.address, axlUsdcToken.address],
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 2,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 400n,
+          priceBand: 10000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA, filecoinPayContractB],
+          stablecoins: [usdfcToken.address, axlUsdcToken.address],
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
 
-      // USDFC rail
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 4,
-        railId: 1n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+        // USDFC rail
+        rail({
+          filecoinPayContract: filecoinPayContractA,
+          railId: 1n,
+          token: usdfcToken,
+          payee: zeroAddress,
+          payer: payerA,
+          operator: operatorA,
+          validator: zeroAddress,
+        }).railCreatedTx(),
 
-      // axlUSDC rail
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 5,
-        railId: 2n,
-        token: axlUsdcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+        // axlUSDC rail
+        rail({
+          filecoinPayContract: filecoinPayContractA,
+          railId: 2n,
+          token: axlUsdcToken,
+          payee: zeroAddress,
+          payer: payerA,
+          operator: operatorA,
+          validator: zeroAddress,
+        }).railCreatedTx(),
 
-      // FIL rail
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 6,
-        railId: 3n,
-        token: filToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+        // FIL rail
+        rail({
+          filecoinPayContract: filecoinPayContractA,
+          railId: 3n,
+          token: filToken,
+          payee: zeroAddress,
+          payer: payerA,
+          operator: operatorA,
+          validator: zeroAddress,
+        }).railCreatedTx(),
+      ]),
+
+      // Not admitted contract seed case
+      block(q1.startEpoch, [
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractB,
+          recipient: payerA,
+          requested: usdfcToken.formatNumericValue(21n),
+          value: auctionClaim,
+        }),
+      ]),
+
+      // Not admitted token seed case
+      block(q1.startEpoch + 1n, [
+        burnForFeesTx({
+          token: axlUsdcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: axlUsdcToken.formatNumericValue(22n),
+          value: auctionClaim,
+        }),
+      ]),
+
+      // Default seed
+      block(
+        q1.startEpoch + 2n,
+        range(0, 5).map((index) => {
+          return burnForFeesTx({
+            token: usdfcToken.address,
+            filecoinPayContract: filecoinPayContractA,
+            recipient: payerA,
+            requested: usdfcToken.formatNumericValue(10n * BigInt(index + 1)),
+            value: auctionClaim,
+          });
+        }),
+      ),
+
+      // Not admitted contract case
+      block(q1.startEpoch + 3n, [
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractB,
+          recipient: payerA,
+          requested: usdfcToken.formatNumericValue(61n),
+          value: auctionClaim,
+        }),
+      ]),
+
+      // Not admitted token case
+      block(q1.startEpoch + 4n, [
+        burnForFeesTx({
+          token: axlUsdcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: axlUsdcToken.formatNumericValue(62n),
+          value: auctionClaim,
+        }),
+      ]),
+
+      // Qualifying auction
+      block(q1.startEpoch + 5n, [
+        burnForFeesTx({
+          token: usdfcToken.address,
+          filecoinPayContract: filecoinPayContractA,
+          recipient: payerA,
+          requested: usdfcToken.formatNumericValue(31n),
+          value: auctionClaim,
+        }),
+      ]),
     ]);
 
-    testFilecoinClient.forwardTo(q1.startEpoch - 1n);
-
-    // need to index multiple times with fresh set of logs because test
-    // implementation does not support advanced filtering eg. by indexed args
-    await indexerOrchestrator.execute();
-
-    // Not admitted contract seed case
-    const notAdmittedContractSeedAuction = transferLog({
-      address: usdfcToken.address,
-      blockNumber: q1.startEpoch,
-      logIndex: 0,
-      from: filecoinPayContractB,
-      to: payerA,
-      value: usdfcToken.formatNumericValue(21n),
-    });
-
-    const notAdmittedContractSeedAuctionTx = burnForFeesTransaction({
-      hash: notAdmittedContractSeedAuction.transactionHash,
-      requested: notAdmittedContractSeedAuction.args.value,
-      token: notAdmittedContractSeedAuction.address,
-      value: auctionClaim,
-    });
-
-    testFilecoinClient.replaceLogs(
-      [notAdmittedContractSeedAuction],
-      [notAdmittedContractSeedAuctionTx],
-    );
-
-    testFilecoinClient.forwardTo((b) => b + 1n);
-
-    await indexerOrchestrator.execute();
-
-    // Not admitted token seed case
-    const notAdmittedTokenSeedAuction = transferLog({
-      address: axlUsdcToken.address,
-      blockNumber: notAdmittedContractSeedAuction.blockNumber + 1n,
-      logIndex: 0,
-      from: filecoinPayContractA,
-      to: payerA,
-      value: axlUsdcToken.formatNumericValue(22n),
-    });
-
-    const notAdmittedTokenSeedAuctionTx = burnForFeesTransaction({
-      hash: notAdmittedTokenSeedAuction.transactionHash,
-      requested: notAdmittedTokenSeedAuction.args.value,
-      token: notAdmittedTokenSeedAuction.address,
-      value: auctionClaim,
-    });
-
-    testFilecoinClient.replaceLogs(
-      [notAdmittedTokenSeedAuction],
-      [notAdmittedTokenSeedAuctionTx],
-    );
-
-    testFilecoinClient.forwardTo((b) => b + 1n);
-
-    await indexerOrchestrator.execute();
-
-    // Default seed
-    const seedAuctions = range(0, 5).map((index) => {
-      return transferLog({
-        address: usdfcToken.address,
-        blockNumber: notAdmittedTokenSeedAuction.blockNumber + 1n,
-        logIndex: index,
-        from: filecoinPayContractA,
-        to: payerA,
-        value: usdfcToken.formatNumericValue(10n * BigInt(index + 1)),
-      });
-    });
-
-    const seedTransactions = seedAuctions.map((log) => {
-      return burnForFeesTransaction({
-        hash: log.transactionHash,
-        requested: log.args.value,
-        token: log.address,
-        value: auctionClaim,
-      });
-    });
-
-    testFilecoinClient.replaceLogs(seedAuctions, seedTransactions);
-    testFilecoinClient.forwardTo((b) => b + 1n);
-
-    await indexerOrchestrator.execute();
-
-    // Not admitted contract case
-    const notAdmittedContractAuction = transferLog({
-      address: usdfcToken.address,
-      blockNumber: notAdmittedTokenSeedAuction.blockNumber + 2n,
-      logIndex: 0,
-      from: filecoinPayContractB,
-      to: payerA,
-      value: usdfcToken.formatNumericValue(61n),
-    });
-
-    const notAdmittedContractAuctionTx = burnForFeesTransaction({
-      hash: notAdmittedContractAuction.transactionHash,
-      requested: notAdmittedContractAuction.args.value,
-      token: notAdmittedContractAuction.address,
-      value: auctionClaim,
-    });
-
-    testFilecoinClient.replaceLogs(
-      [notAdmittedContractAuction],
-      [notAdmittedContractAuctionTx],
-    );
-
-    testFilecoinClient.forwardTo((b) => b + 1n);
-
-    await indexerOrchestrator.execute();
-
-    // Not admitted token case
-    const notAdmittedTokenAuction = transferLog({
-      address: axlUsdcToken.address,
-      blockNumber: notAdmittedContractAuction.blockNumber + 1n,
-      logIndex: 0,
-      from: filecoinPayContractA,
-      to: payerA,
-      value: axlUsdcToken.formatNumericValue(62n),
-    });
-
-    const notAdmittedTokenAuctionTx = burnForFeesTransaction({
-      hash: notAdmittedTokenAuction.transactionHash,
-      requested: notAdmittedTokenAuction.args.value,
-      token: notAdmittedTokenAuction.address,
-      value: auctionClaim,
-    });
-
-    testFilecoinClient.replaceLogs(
-      [notAdmittedTokenAuction],
-      [notAdmittedTokenAuctionTx],
-    );
-
-    testFilecoinClient.forwardTo((b) => b + 1n);
-
-    await indexerOrchestrator.execute();
-
-    // Qualifying auction
-    const qualifyingAuction = transferLog({
-      address: usdfcToken.address,
-      blockNumber: notAdmittedTokenAuction.blockNumber + 2n,
-      logIndex: 0,
-      from: filecoinPayContractA,
-      to: payerA,
-      value: usdfcToken.formatNumericValue(31n),
-    });
-
-    const qualifyingAuctionTx = burnForFeesTransaction({
-      hash: qualifyingAuction.transactionHash,
-      requested: qualifyingAuction.args.value,
-      token: qualifyingAuction.address,
-      value: auctionClaim,
-    });
-
-    testFilecoinClient.replaceLogs([qualifyingAuction], [qualifyingAuctionTx]);
     testFilecoinClient.forwardTo(q1.endEpoch + 1n);
-
     await indexerOrchestrator.execute();
 
     // Validation
@@ -3379,49 +3229,35 @@ describe('FIP-0118 adherence test', () => {
     const indexerOrchestrator = app.get(IndexerOrchestratorService);
     const q2 = await app.get(QuartersService).getQuarterByIndex(2);
 
-    testFilecoinClient.resetWithLogs([
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 3,
-        orchestrator: orchestratorB,
-        wallet: orchestratorB,
-      }),
+    testFilecoinClient.reset([
+      block(1, [
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorB,
+          wallet: orchestratorB,
+        }),
+      ]),
 
-      volumeLog({
-        address: serviceRewardsActor,
-        blockNumber: q2.startEpoch,
-        logIndex: 0,
-        orchestrator: orchestratorA,
-        volume: filToken.formatNumericValue(1),
-        q: 1n,
-        isCorrection: false,
-      }),
-      volumeLog({
-        address: serviceRewardsActor,
-        blockNumber: q2.startEpoch,
-        logIndex: 1,
-        orchestrator: orchestratorB,
-        volume: filToken.formatNumericValue(10),
-        q: 1n,
-        isCorrection: false,
-      }),
-      volumeLog({
-        address: serviceRewardsActor,
-        blockNumber: q2.startEpoch,
-        logIndex: 2,
-        orchestrator: orchestratorA,
-        volume: 0n,
-        q: 1n,
-        isCorrection: true,
-      }),
+      block(q2.startEpoch, [
+        volumePostedTx({
+          orchestrator: orchestratorA,
+          volume: filToken.formatNumericValue(1),
+          q: 1n,
+        }),
+        volumePostedTx({
+          orchestrator: orchestratorB,
+          volume: filToken.formatNumericValue(10),
+          q: 1n,
+        }),
+        volumeCorrectedTx({
+          orchestrator: orchestratorA,
+          volume: 0n,
+          q: 1n,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q2.endEpoch + 1n);
@@ -3471,85 +3307,64 @@ describe('FIP-0118 adherence test', () => {
     const indexerOrchestrator = app.get(IndexerOrchestratorService);
     const q1 = await app.get(QuartersService).getQuarterByIndex(1);
 
-    testFilecoinClient.resetWithLogs([
-      pricingParamsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 0,
-        minLotFloor: 0n,
-        minLotAlphaDen: 1n,
-        minLotAlphaNum: 400n,
-        priceBand: 30_000n,
-        registrationCutoff: 5n,
-      }),
-      admittedListsUpdatedLog({
-        address: serviceRewardsActor,
-        blockNumber: 1n,
-        logIndex: 1,
-        filecoinPayContracts: [filecoinPayContractA],
-        stablecoins: [usdfcToken.address],
-      }),
-      railCreatedLog({
-        address: filecoinPayContractA,
-        blockNumber: 1n,
-        logIndex: 2,
-        railId: 1n,
-        token: usdfcToken.address,
-        payee: zeroAddress,
-        payer: payerA,
-        operator: operatorA,
-        validator: zeroAddress,
-      }),
+    const railOne = rail({
+      filecoinPayContract: filecoinPayContractA,
+      railId: 1n,
+      token: usdfcToken,
+      payee: zeroAddress,
+      payer: payerA,
+      operator: operatorA,
+      validator: zeroAddress,
+    });
+
+    testFilecoinClient.reset([
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 400n,
+          priceBand: 30_000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        railOne.railCreatedTx(),
+      ]),
 
       // q1
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch,
-        logIndex: 0,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
-      bindingDeclaredLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch,
-        logIndex: 1,
-        orchestrator: orchestratorA,
-        payer: payerA,
-        operator: operatorA,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 2,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(1),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(1),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      orchestratorRemovedLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch,
-        logIndex: 3,
-        orchestrator: orchestratorA,
-      }),
-      railSettledLog({
-        address: filecoinPayContractA,
-        blockNumber: q1.startEpoch,
-        logIndex: 4,
-        railId: 1n,
-        totalSettledAmount: usdfcToken.formatNumericValue(10),
-        totalNetPayeeAmount: usdfcToken.formatNumericValue(10),
-        operatorCommission: 0n,
-        networkFee: 0n,
-      }),
-      orchestratorAdmittedLog({
-        address: serviceRewardsActor,
-        blockNumber: q1.startEpoch,
-        logIndex: 5,
-        orchestrator: orchestratorA,
-        wallet: orchestratorA,
-      }),
+      block(q1.startEpoch, [
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          payer: payerA,
+          operator: operatorA,
+        }),
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 1,
+        }),
+        orchestratorRemovedTx({
+          orchestrator: orchestratorA,
+        }),
+        railOne.railSettledTx({
+          settledUpTo: q1.startEpoch,
+          totalNetPayeeAmount: 10,
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        bindingDeclaredTx({
+          orchestrator: orchestratorA,
+          payer: payerA,
+          operator: operatorA,
+        }),
+      ]),
     ]);
 
     testFilecoinClient.forwardTo(q1.endEpoch + 1n);
@@ -3561,7 +3376,224 @@ describe('FIP-0118 adherence test', () => {
       .expect(200);
 
     expect(response.body).toMatchObject({
-      volumeAttoUsd: usdfcToken.formatNumericValue(1).toString(),
+      volumeAttoUsd: usdfcToken.formatNumericValue(10).toString(),
+    });
+  });
+
+  it('Indexes auctions triggered via multicall/multisig', async () => {
+    const indexerOrchestrator = app.get(IndexerOrchestratorService);
+    const q1 = await app.get(QuartersService).getQuarterByIndex(1);
+    const auctionBaseValue = filToken.formatNumericValue(1);
+
+    const traceBlockNumber = Number(q1.startEpoch + 1n);
+    const multiTxHash = nextTxHash();
+    const callerAddress: Address = '0x000000000000000000000000000000000000a001';
+    const safeAddress: Address = '0x000000000000000000000000000000000000a002';
+    const multicallAddress: Address =
+      '0x000000000000000000000000000000000000a003';
+    const requestedAmount1 = usdfcToken.formatNumericValue(11);
+    const requestedAmount2 = usdfcToken.formatNumericValue(12);
+
+    testFilecoinClient.reset([
+      // bootstrap
+      block(1, [
+        pricingParamsUpdatedTx({
+          minLotFloor: 0n,
+          minLotAlphaDen: 1n,
+          minLotAlphaNum: 400n,
+          priceBand: 30_000n,
+          registrationCutoff: 5n,
+        }),
+        admittedListsUpdatedTx({
+          filecoinPayContracts: [filecoinPayContractA],
+          stablecoins: [usdfcToken.address],
+        }),
+        orchestratorAdmittedTx({
+          orchestrator: orchestratorA,
+          wallet: orchestratorA,
+        }),
+        rail({
+          filecoinPayContract: filecoinPayContractA,
+          railId: 1n,
+          token: usdfcToken,
+          payee: zeroAddress,
+          payer: payerA,
+          operator: operatorA,
+          validator: zeroAddress,
+        }).railCreatedTx(),
+      ]),
+
+      // seed auctions
+      block(
+        q1.startEpoch,
+        range(0, 5).map(() => {
+          return burnForFeesTx({
+            token: usdfcToken.address,
+            filecoinPayContract: filecoinPayContractA,
+            recipient: payerA,
+            requested: usdfcToken.formatNumericValue(10),
+            value: auctionBaseValue,
+          });
+        }),
+      ),
+
+      // transaction simulating call to a multisig calling a multicall contract
+      block(traceBlockNumber, [
+        {
+          hash: multiTxHash,
+          to: safeAddress,
+
+          // trace multisig -> multicall -> 2x burnForFees
+          trace: [
+            // call to multisig
+            {
+              type: 'call',
+              subtraces: 1,
+              traceAddress: [],
+              action: {
+                callType: 'call',
+                from: callerAddress,
+                to: safeAddress,
+                gas: '0x493e0',
+                input: '0x', // not required
+                value: toHex(auctionBaseValue * 2n), // two auctions
+              },
+              result: {
+                gasUsed: '0x186a0',
+                output: '0x',
+              },
+              blockHash:
+                '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              blockNumber: traceBlockNumber,
+              transactionHash: multiTxHash,
+              transactionPosition: 0,
+            },
+
+            // call to multicall
+            {
+              type: 'call',
+              subtraces: 2,
+              traceAddress: [0],
+              action: {
+                callType: 'call',
+                from: safeAddress,
+                to: multicallAddress,
+                gas: '0x30d40',
+                input: '0x',
+                value: toHex(auctionBaseValue * 2n), // still 2 auctions worth
+              },
+              result: {
+                gasUsed: '0x13880',
+                output: '0x',
+              },
+              blockHash:
+                '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              blockNumber: traceBlockNumber,
+              transactionHash: multiTxHash,
+              transactionPosition: 0,
+            },
+
+            // burnForFees 1
+            {
+              type: 'call',
+              subtraces: 0,
+              traceAddress: [0, 0],
+              action: {
+                callType: 'call',
+                from: multicallAddress,
+                to: filecoinPayContractA,
+                gas: '0x9c40',
+                input: encodeFunctionData({
+                  abi: FilecoinPayV1ABI,
+                  functionName: 'burnForFees',
+                  args: [usdfcToken.address, callerAddress, requestedAmount1],
+                }),
+                value: toHex(auctionBaseValue),
+              },
+              result: {
+                gasUsed: '0x7530',
+                output: '0x',
+              },
+              blockHash:
+                '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              blockNumber: traceBlockNumber,
+              transactionHash: multiTxHash,
+              transactionPosition: 0,
+            },
+
+            // burnForFees 2
+            {
+              type: 'call',
+              subtraces: 0,
+              traceAddress: [0, 1],
+              action: {
+                callType: 'call',
+                from: multicallAddress,
+                to: filecoinPayContractA,
+                gas: '0x9c40',
+                input: encodeFunctionData({
+                  abi: FilecoinPayV1ABI,
+                  functionName: 'burnForFees',
+                  args: [usdfcToken.address, callerAddress, requestedAmount2],
+                }),
+                value: toHex(auctionBaseValue),
+              },
+              result: {
+                gasUsed: '0x7530',
+                output: '0x',
+              },
+              blockHash:
+                '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              blockNumber: traceBlockNumber,
+              transactionHash: multiTxHash,
+              transactionPosition: 0,
+            },
+          ],
+
+          // two burnForFees calls will produce two ERC20 transfers to the
+          // recipient address (plus more irrelevant here, like burn transfers)
+          logs: [
+            {
+              address: usdfcToken.address,
+              eventName: 'Transfer',
+              args: {
+                from: filecoinPayContractA,
+                to: callerAddress,
+                value: requestedAmount1,
+              },
+            },
+            {
+              address: usdfcToken.address,
+              eventName: 'Transfer',
+              args: {
+                from: filecoinPayContractA,
+                to: callerAddress,
+                value: requestedAmount2,
+              },
+            },
+          ],
+        },
+      ]),
+    ]);
+
+    testFilecoinClient.forwardTo(q1.endEpoch + 1n);
+    await indexerOrchestrator.execute();
+
+    const response = await request(app.getHttpServer())
+      .get(`/volume/1/${orchestratorA}`)
+      .expect(200);
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    const pricingPeriods = response.body.pricingPeriods as unknown[];
+
+    expect(pricingPeriods.length).toBe(2);
+    expect(pricingPeriods[0]).toMatchObject({
+      lotAttoUsd: filToken.formatNumericValue(11).toString(),
+      claimAttoFil: auctionBaseValue.toString(),
+    });
+    expect(pricingPeriods[1]).toMatchObject({
+      lotAttoUsd: filToken.formatNumericValue(12).toString(),
+      claimAttoFil: auctionBaseValue.toString(),
     });
   });
 
@@ -3581,341 +3613,3 @@ describe('FIP-0118 adherence test', () => {
     await query.execute(db);
   }
 });
-
-let txNumber = 0;
-
-function nextTxHash(): Hash {
-  txNumber = txNumber + 1;
-  return `0x${txNumber.toString(16).padStart(64, '0')}`;
-}
-
-function orchestratorAdmittedLog({
-  orchestrator,
-  wallet,
-  txHash,
-  ...logInputs
-}: LogInputs & {
-  orchestrator: Address;
-  wallet: Address;
-}) {
-  return {
-    eventName: 'OrchestratorAdmitted',
-    args: { orch: orchestrator, wallet },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function orchestratorRemovedLog({
-  orchestrator,
-  txHash,
-  ...logInputs
-}: LogInputs & { orchestrator: Address }) {
-  return {
-    eventName: 'OrchestratorRemoved',
-    args: { orch: orchestrator },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function bindingReassignedLog({
-  payer,
-  operator,
-  orchestrator,
-  inherit,
-  txHash,
-  ...logInputs
-}: LogInputs & {
-  payer: Address;
-  operator: Address;
-  orchestrator: Address;
-  inherit: boolean;
-}) {
-  return {
-    eventName: 'BindingReassigned',
-    args: { payer, operator, orchestrator, inherit },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function bindingCanceledLog({
-  payer,
-  operator,
-  orchestrator,
-  txHash,
-  ...logInputs
-}: LogInputs & {
-  payer: Address;
-  operator: Address;
-  orchestrator: Address;
-}) {
-  return {
-    eventName: 'BindingCanceled',
-    args: { payer, operator, orchestrator },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function admittedListsUpdatedLog({
-  filecoinPayContracts,
-  stablecoins,
-  txHash,
-  ...logInputs
-}: LogInputs & {
-  filecoinPayContracts: Address[];
-  stablecoins: Address[];
-}) {
-  return {
-    eventName: 'AdmittedListsUpdated',
-    args: { filecoinPayContracts, stablecoins },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function pricingParamsUpdatedLog({
-  minLotFloor,
-  minLotAlphaNum,
-  minLotAlphaDen,
-  priceBand,
-  registrationCutoff,
-  txHash,
-  ...logInputs
-}: LogInputs & {
-  minLotFloor: bigint;
-  minLotAlphaNum: bigint;
-  minLotAlphaDen: bigint;
-  priceBand: bigint;
-  registrationCutoff: bigint;
-}) {
-  return {
-    eventName: 'PricingParamsUpdated',
-    args: {
-      minLotFloor,
-      minLotAlphaNum,
-      minLotAlphaDen,
-      priceBand,
-      registrationCutoff,
-    },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function bindingDeclaredLog({
-  payer,
-  operator,
-  orchestrator,
-  txHash,
-  ...logInputs
-}: LogInputs & {
-  payer: Address;
-  operator: Address;
-  orchestrator: Address;
-}) {
-  return {
-    eventName: 'BindingDeclared',
-    args: { payer, operator, orchestrator },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function railCreatedLog({
-  payee,
-  payer,
-  operator,
-  railId,
-  token,
-  validator,
-  txHash,
-  ...logInputs
-}: LogInputs & {
-  payee: Address;
-  payer: Address;
-  operator: Address;
-  railId: bigint;
-  token: Address;
-  validator: Address;
-}) {
-  return {
-    eventName: 'RailCreated',
-    args: {
-      railId,
-      payer,
-      payee,
-      operator,
-      validator,
-      token,
-    },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function railSettledLog({
-  networkFee,
-  operatorCommission,
-  railId,
-  totalNetPayeeAmount,
-  totalSettledAmount,
-  txHash,
-  ...logInputs
-}: LogInputs & {
-  networkFee: bigint;
-  operatorCommission: bigint;
-  railId: bigint;
-  totalNetPayeeAmount: bigint;
-  totalSettledAmount: bigint;
-}) {
-  return {
-    eventName: 'RailSettled',
-    args: {
-      networkFee,
-      operatorCommission,
-      railId,
-      settledUpTo: logInputs.blockNumber,
-      totalNetPayeeAmount,
-      totalSettledAmount,
-    },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function railOneTimePaymentProcessedLog({
-  netPayeeAmount,
-  networkFee,
-  operatorCommission,
-  railId,
-  txHash,
-  ...logInputs
-}: LogInputs & {
-  netPayeeAmount: bigint;
-  networkFee: bigint;
-  operatorCommission: bigint;
-  railId: bigint;
-}) {
-  return {
-    eventName: 'RailOneTimePaymentProcessed',
-    args: {
-      railId,
-      netPayeeAmount,
-      networkFee,
-      operatorCommission,
-    },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function transferLog({
-  from,
-  to,
-  value,
-  txHash,
-  ...logInputs
-}: LogInputs & {
-  from: Address;
-  to: Address;
-  value: bigint;
-}) {
-  return {
-    eventName: 'Transfer',
-    args: {
-      from,
-      to,
-      value,
-    },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function volumeLog({
-  orchestrator,
-  q,
-  volume,
-  isCorrection,
-  txHash,
-  ...logInputs
-}: LogInputs & {
-  orchestrator: Address;
-  q: bigint;
-  volume: bigint;
-  isCorrection: boolean;
-}) {
-  return {
-    eventName: isCorrection ? 'VolumeCorrected' : 'VolumePosted',
-    args: {
-      orchestrator,
-      q,
-      volume,
-    },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function sharesSubmittedLog({
-  q,
-  recipientCount,
-  totalUsd,
-  txHash,
-  ...logInputs
-}: LogInputs & {
-  q: bigint;
-  recipientCount?: bigint;
-  totalUsd: bigint;
-}) {
-  return {
-    eventName: 'SharesSubmitted',
-    args: {
-      q,
-      recipientCount: recipientCount ?? 1n,
-      totalUsd,
-    },
-    logIndex: 0,
-    transactionHash: txHash ?? nextTxHash(),
-    ...logInputs,
-  };
-}
-
-function burnForFeesTransaction({
-  hash,
-  recipient,
-  requested,
-  token,
-  value,
-}: {
-  hash: Hash;
-  recipient?: Address;
-  requested: bigint;
-  token: Address;
-  value: bigint;
-}): TestTransaction {
-  return {
-    hash,
-    value,
-    input: encodeFunctionData({
-      abi: FilecoinPayV1ABI,
-      functionName: 'burnForFees',
-      args: [token, recipient ?? zeroAddress, requested],
-    }),
-  };
-}

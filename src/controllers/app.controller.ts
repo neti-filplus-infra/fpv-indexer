@@ -1,7 +1,8 @@
 import {
-  BlockNumberResponse,
-  blockNumberResponseSchema,
-  indexerStatusSchema,
+  type BlockNumberResponse,
+  blockNumberResponse,
+  type IndexerStatus,
+  indexerStatus,
 } from '@/lib/schemas';
 import { BlockNumberService } from '@/services/block-number-service';
 import { IndexerOrchestratorService } from '@/services/indexer-orchestrator.service';
@@ -16,20 +17,20 @@ export class AppController {
   ) {}
 
   @Get('/status')
-  @SerializeOptions({ schema: indexerStatusSchema })
+  @SerializeOptions({ schema: indexerStatus })
   @ApiOkResponse({
     description: 'Indexer status',
-    standardSchema: indexerStatusSchema,
+    standardSchema: indexerStatus,
   })
-  public getStatus() {
+  public getStatus(): Promise<IndexerStatus> {
     return this.indexerOrchestratorService.getStatus();
   }
 
   @Get('/block-number')
-  @SerializeOptions({ schema: blockNumberResponseSchema })
+  @SerializeOptions({ schema: blockNumberResponse })
   @ApiOkResponse({
     description: 'Block number response.',
-    standardSchema: blockNumberResponseSchema,
+    standardSchema: blockNumberResponse,
   })
   public async getBlockNumber(): Promise<BlockNumberResponse> {
     const blockNumber = await this.blockNumberService.getBlockNumber();

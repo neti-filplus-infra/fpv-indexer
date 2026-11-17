@@ -1,6 +1,7 @@
 import {
-  serviceOrchestratorSchema,
-  serviceOrchestratorsListSchema,
+  serviceOrchestrator,
+  type ServiceOrchestratorsList,
+  serviceOrchestratorsList,
 } from '@/lib/schemas';
 import { ServiceOrchestratorService } from '@/services/service-orchestrator.service';
 import { Controller, Get, SerializeOptions } from '@nestjs/common';
@@ -13,15 +14,15 @@ export class ServiceOrchestratorsController {
   ) {}
 
   @Get('/')
-  @SerializeOptions({ schema: serviceOrchestratorSchema })
+  @SerializeOptions({ schema: serviceOrchestrator })
   @ApiOperation({
     summary: 'Get list of service orchestrators.',
   })
   @ApiOkResponse({
     description: `Service Orchestrators list.`,
-    standardSchema: serviceOrchestratorsListSchema,
+    standardSchema: serviceOrchestratorsList,
   })
-  public getServiceOrchestratorQuarterlyVolume() {
+  public getServiceOrchestratorQuarterlyVolume(): Promise<ServiceOrchestratorsList> {
     return this.serviceOrchestratorService.getServiceOrchestrators();
   }
 }
