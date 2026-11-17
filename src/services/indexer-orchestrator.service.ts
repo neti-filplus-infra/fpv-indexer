@@ -18,6 +18,7 @@ import { CronJob } from 'cron';
 import { Address, isAddress, isAddressEqual, zeroAddress } from 'viem';
 import { ERC20TokenInfoService } from './erc-20-token-info.service';
 import { FilfoxApiService } from './filfox-api.service';
+import { sql } from 'kysely';
 
 @Injectable()
 export class IndexerOrchestratorService implements OnApplicationBootstrap {
@@ -360,16 +361,22 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
         await tx
           .deleteFrom('service_orchestrator_quarterly_volume')
           .executeTakeFirst();
+        await tx
+          .deleteFrom('service_orchestrator_admission')
+          .executeTakeFirst();
         await tx.deleteFrom('service_orchestrator').executeTakeFirst();
         await tx.deleteFrom('whitelisted_token').executeTakeFirst();
         await tx
           .deleteFrom('service_rewards_actor_parameter')
           .executeTakeFirst();
-        await tx.deleteFrom('indexer_state').executeTakeFirst();
         await tx
           .deleteFrom('stream_weight_actor_parameters')
           .executeTakeFirst();
         await tx.deleteFrom('quarterly_gate_check').executeTakeFirst();
+        await tx.deleteFrom('indexer_state').executeTakeFirst();
+        await sql`REFRESH MATERIALIZED VIEW qualified_price_periods_mv`.execute(
+          tx,
+        );
       });
 
       this.logger.log('Cleanup completed.');

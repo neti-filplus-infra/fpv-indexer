@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/fidlabs/fpv-indexer/compare/v2.0.0...v2.0.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* properly cleanup tables on major version change ([#52](https://github.com/fidlabs/fpv-indexer/issues/52)) ([fc89e7e](https://github.com/fidlabs/fpv-indexer/commit/fc89e7e800532ab0af512905ec93f186d3d8f9db))
+
 ## [2.0.0](https://github.com/fidlabs/fpv-indexer/compare/v1.1.1...v2.0.0) (2026-11-16)
 
 
