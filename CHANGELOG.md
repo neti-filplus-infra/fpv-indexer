@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/fidlabs/fpv-indexer/compare/v2.0.1...v2.1.0) (2026-11-17)
+
+
+### Features
+
+* use dynamic batch size based on timeouts count ([#54](https://github.com/fidlabs/fpv-indexer/issues/54)) ([968b568](https://github.com/fidlabs/fpv-indexer/commit/968b568aed515e75334303fb7a9b8b7c61d397a5))
+
 ## [2.0.1](https://github.com/fidlabs/fpv-indexer/compare/v2.0.0...v2.0.1) (2026-11-17)
 
 

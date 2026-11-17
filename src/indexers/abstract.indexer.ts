@@ -12,7 +12,7 @@ import type {
 import { maxBigInt, numericToBigInt } from '@/lib/utils';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { Address } from 'viem';
+import { type Address, TimeoutError } from 'viem';
 
 export interface GetChangesParameters {
   archiveClient: FilecoinPublicClient;
@@ -46,6 +46,38 @@ export abstract class AbstractIndexer<C = unknown> {
   }
 
   public async run(parameters: IndexerRunParameters) {
+    await this.runWithTimeoutRetries(parameters, 0);
+  }
+
+  private async runWithTimeoutRetries(
+    parameters: IndexerRunParameters,
+    timeoutCount: number,
+  ) {
+    try {
+      await this.execute(parameters, timeoutCount);
+    } catch (error) {
+      if (!(error instanceof TimeoutError)) throw error;
+
+      const nextTimeoutCount = timeoutCount + 1;
+
+      if (timeoutCount >= 10) {
+        this.logger.warn(
+          'Timed out more than 10 times. Immediate retry will not trigger.',
+        );
+        throw error;
+      }
+
+      this.logger.warn(
+        `Viem call timed out ${nextTimeoutCount} time${nextTimeoutCount === 1 ? '' : 's'}. Retrying immediately with lower batch size.`,
+      );
+      await this.runWithTimeoutRetries(parameters, nextTimeoutCount);
+    }
+  }
+
+  private async execute(
+    parameters: IndexerRunParameters,
+    timeoutCount: number,
+  ) {
     const { contractAddress, minBlockNumber, maxBlockNumber } = parameters;
     this.logger = new Logger(`${this.getName()}:${contractAddress}`);
     const logger = this.logger;
@@ -102,13 +134,17 @@ export abstract class AbstractIndexer<C = unknown> {
     }
 
     const blockDifference = maxToBlock - fromBlock;
-    const batchBlockSize = this.configService.get(
+    const initialBatchBlockSize = this.configService.get(
       shouldUseArchiveNode
         ? 'ARCHIVE_NODE_BATCH_BLOCK_SIZE'
         : 'RECENT_NODE_BATCH_BLOCK_SIZE',
       {
         infer: true,
       },
+    );
+    const batchBlockSize = maxBigInt(
+      1n,
+      initialBatchBlockSize / BigInt(timeoutCount + 1),
     );
     const toBlock =
       blockDifference >= batchBlockSize
@@ -158,7 +194,7 @@ export abstract class AbstractIndexer<C = unknown> {
     const keepRunning = maxToBlock !== toBlock;
 
     logger.log(
-      `Indexed changes up to block ${toBlock.toString()}. ${keepRunning ? 'Scheduling another run.' : 'Indexer up to date.'}.`,
+      `Indexed changes up to block ${toBlock.toString()}. ${keepRunning ? 'Scheduling another run' : 'Indexer up to date'}.`,
     );
 
     // keep indexing if we havent synced up

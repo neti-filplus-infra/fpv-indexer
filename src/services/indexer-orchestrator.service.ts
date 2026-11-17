@@ -66,7 +66,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
 
   private async index() {
     if (this.isRunning) {
-      this.logger.log('Indexing already in progress, skipping execution');
+      this.logger.log('Indexing already in progress, skipping execution.');
       return;
     }
 
@@ -202,7 +202,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
 
       if (!isERC20) {
         this.logger.warn(
-          `Token "${tokenAddress}" found in database does not point to a valid ERC20 contract and won't be indexer.`,
+          `Token "${tokenAddress}" found in database does not point to a valid ERC20 contract and won't be indexed.`,
         );
 
         return;
