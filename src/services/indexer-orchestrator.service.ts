@@ -171,7 +171,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
       },
     );
 
-    await Promise.all(filecoinPayIndexerRuns);
+    await Promise.allSettled(filecoinPayIndexerRuns);
 
     const auctionableTokens = await db
       .selectFrom('filecoin_pay_rail as r')
@@ -218,7 +218,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
       });
     });
 
-    await Promise.all(auctionableTokenIndexerRuns);
+    await Promise.allSettled(auctionableTokenIndexerRuns);
   }
 
   public async getStatus(): Promise<IndexerStatus> {

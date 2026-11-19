@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.1](https://github.com/fidlabs/fpv-indexer/compare/v2.1.0...v2.1.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* wait for concurrent indexers to finish before retry on error ([#58](https://github.com/fidlabs/fpv-indexer/issues/58)) ([a6fab2a](https://github.com/fidlabs/fpv-indexer/commit/a6fab2ab21054598dc0cd8c262ecac0b6528fee3))
+
+
+### Documentation
+
+* update instances URLs ([#56](https://github.com/fidlabs/fpv-indexer/issues/56)) ([a140ac0](https://github.com/fidlabs/fpv-indexer/commit/a140ac0a2d3f356ceceaa889d21bcd05998325ae))
+
 ## [2.1.0](https://github.com/fidlabs/fpv-indexer/compare/v2.0.1...v2.1.0) (2026-11-17)
 
 
