@@ -15,10 +15,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { CronExpression, SchedulerRegistry } from '@nestjs/schedule';
 import { CronJob } from 'cron';
+import { sql } from 'kysely';
 import { Address, isAddress, isAddressEqual, zeroAddress } from 'viem';
 import { ERC20TokenInfoService } from './erc-20-token-info.service';
 import { FilfoxApiService } from './filfox-api.service';
-import { sql } from 'kysely';
+import { IndexerRunner } from './indexer-runner.service';
 
 @Injectable()
 export class IndexerOrchestratorService implements OnApplicationBootstrap {
@@ -35,6 +36,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
     private readonly schedulerRegistry: SchedulerRegistry,
     private readonly filfoxApiService: FilfoxApiService,
     private readonly erc20Service: ERC20TokenInfoService,
+    private readonly indexerRunner: IndexerRunner,
     private readonly serviceRewardsActorIndxer: ServiceRewardsActorIndexer,
     private readonly streamWeightActorIndexer: StreamWeightActorIndexer,
     private readonly filecoinPayV1Indexer: FilecoinPayV1Indexer,
@@ -66,7 +68,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
 
   private async index() {
     if (this.isRunning) {
-      this.logger.log('Indexing already in progress, skipping execution.');
+      this.logger.debug('Indexing already in progress, skipping execution.');
       return;
     }
 
@@ -76,20 +78,20 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
         IndexerOrchestratorService.RETRY_TIMEOUT_NAME,
       )
     ) {
-      this.logger.log('Clearing retry timeout.');
+      this.logger.debug('Clearing retry timeout.');
       this.schedulerRegistry.deleteTimeout(
         IndexerOrchestratorService.RETRY_TIMEOUT_NAME,
       );
     }
 
-    this.logger.log('Starting indexing');
+    this.logger.debug('Starting indexing');
 
     try {
       this.isRunning = true;
       await this.execute();
     } catch (error) {
-      this.logger.error(error);
-      this.logger.log(
+      this.logger.error(
+        { error },
         `Error occured during indexing. Retrying in ${IndexerOrchestratorService.RETRY_TIMEOUT_SECONDS} seconds.`,
       );
 
@@ -115,7 +117,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
     const sraStartBlock =
       await this.filfoxApiService.getContractDeploymentEpoch(sraAddress);
 
-    await this.serviceRewardsActorIndxer.run({
+    await this.indexerRunner.run(this.serviceRewardsActorIndxer, {
       contractAddress: sraAddress.toLowerCase() as Address,
       minBlockNumber: sraStartBlock,
       maxBlockNumber: null,
@@ -127,7 +129,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
     const swaStartBlock =
       await this.filfoxApiService.getContractDeploymentEpoch(swaAddress);
 
-    await this.streamWeightActorIndexer.run({
+    await this.indexerRunner.run(this.streamWeightActorIndexer, {
       contractAddress: swaAddress.toLowerCase() as Address,
       minBlockNumber: swaStartBlock,
       maxBlockNumber: null,
@@ -155,7 +157,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
               contractAddress,
             );
 
-          await this.filecoinPayV1Indexer.run({
+          await this.indexerRunner.run(this.filecoinPayV1Indexer, {
             contractAddress,
             minBlockNumber,
             maxBlockNumber:
@@ -165,7 +167,10 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
           });
         } else {
           this.logger.warn(
-            `Invalid Filecoin Pay Contract address "${contractAddress} found in database."`,
+            {
+              contractAddress,
+            },
+            'Invalid Filecoin Pay Contract stored',
           );
         }
       },
@@ -184,10 +189,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
       const tokenAddress = token.token.toLowerCase();
 
       if (!isAddress(tokenAddress)) {
-        this.logger.warn(
-          `Rail with invalid token address "${tokenAddress}" found in database. Token won't be indexed.`,
-        );
-
+        this.logger.warn({ tokenAddress }, 'Invalid token address stored');
         return;
       }
 
@@ -201,17 +203,14 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
       }
 
       if (!isERC20) {
-        this.logger.warn(
-          `Token "${tokenAddress}" found in database does not point to a valid ERC20 contract and won't be indexed.`,
-        );
-
+        this.logger.warn({ tokenAddress }, 'Invalid ERC20 stored');
         return;
       }
 
       const minBlockNumber =
         await this.filfoxApiService.getContractDeploymentEpoch(tokenAddress);
 
-      await this.auctionableTokenIndexer.run({
+      await this.indexerRunner.run(this.auctionableTokenIndexer, {
         contractAddress: tokenAddress,
         minBlockNumber,
         maxBlockNumber: null,

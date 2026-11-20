@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/fidlabs/fpv-indexer/compare/v2.1.1...v2.2.0) (2026-11-20)
+
+
+### Features
+
+* add json logging and indexer profiling ([#59](https://github.com/fidlabs/fpv-indexer/issues/59)) ([4f71012](https://github.com/fidlabs/fpv-indexer/commit/4f7101285fe0c47bb73875558a0fafce29c84789))
+
 ## [2.1.1](https://github.com/fidlabs/fpv-indexer/compare/v2.1.0...v2.1.1) (2026-11-19)
 
 

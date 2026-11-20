@@ -1,21 +1,8 @@
 import { BigNumber } from 'bignumber.js';
-import { createPublicClient, extractChain, http, Log, rpcSchema } from 'viem';
+import { Log } from 'viem';
 import { prettifyError } from 'zod';
-import { CONFIG_SCHEMA, SUPPORTED_CHAINS } from './constants';
-import type {
-  ConfigShape,
-  FilecoinPublicClient,
-  FilecoinRpcSchema,
-  TraceableRpcSchema,
-} from './types';
-
-export interface CreateClientForChainParameters {
-  chainId: (typeof SUPPORTED_CHAINS)[number]['id'];
-  rpcUrl?: string | null;
-  authToken?: string | null;
-}
-
-const filecoinRpcSchema = rpcSchema<TraceableRpcSchema | FilecoinRpcSchema>();
+import { CONFIG_SCHEMA } from './constants';
+import type { ConfigShape } from './types';
 
 export class StrictMap<K, V> extends Map<K, V> {
   override get(key: K): V {
@@ -39,43 +26,6 @@ export function validateConfig(config: Record<string, unknown>): ConfigShape {
   }
 
   return result.data;
-}
-
-export function createClientForChain({
-  chainId,
-  rpcUrl,
-  authToken,
-}: CreateClientForChainParameters): FilecoinPublicClient {
-  const chain = extractChain({ chains: SUPPORTED_CHAINS, id: chainId });
-
-  const transport = http(rpcUrl ?? undefined, {
-    fetchOptions:
-      typeof authToken === 'string' && authToken !== ''
-        ? {
-            headers: {
-              Authorization: `Bearer ${authToken}`,
-            },
-          }
-        : undefined,
-    timeout: 60_000,
-  });
-
-  const client = createPublicClient({
-    chain,
-    transport,
-    rpcSchema: filecoinRpcSchema,
-  }).extend((client) => ({
-    filecoin: {
-      chainGetFinalizedTipSet() {
-        return client.request({
-          method: 'Filecoin.ChainGetFinalizedTipSet',
-          params: [],
-        });
-      },
-    },
-  }));
-
-  return client;
 }
 
 export function divideBigInt(

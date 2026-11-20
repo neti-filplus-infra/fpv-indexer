@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
 import FilecoinPayV1ABI from '@/abis/filecoin-pay-v1.abi';
 import { db } from '@/db/db';
-import { ERC20Metadata, FilecoinActions, TraceResult } from '@/lib/types';
+import { ERC20Metadata } from '@/lib/types';
 import { ConfigSeedService } from '@/services/config-seed.service';
 import { IndexerOrchestratorService } from '@/services/indexer-orchestrator.service';
 import { QuartersService } from '@/services/quarters.service';
@@ -27,10 +27,15 @@ import {
   zeroAddress,
 } from 'viem';
 import { AppModule } from '../src/app.module';
-import { ARCHIVE_NODE_CLIENT, RECENT_NODE_CLIENT } from '../src/lib/constants';
 import '../src/polyfill';
 import { ERC20TokenInfoService } from '../src/services/erc-20-token-info.service';
 import { FilfoxApiService } from '../src/services/filfox-api.service';
+import {
+  ARCHIVE_NODE_CLIENT,
+  RECENT_NODE_CLIENT,
+  type FilecoinActions,
+  type TraceResult,
+} from '@/lib/filecoin-client';
 
 type TestLogInput = {
   address?: Address;

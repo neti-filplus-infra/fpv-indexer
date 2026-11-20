@@ -1,13 +1,14 @@
-import { NestFactory, Reflector } from '@nestjs/core';
-import { DocumentBuilder, OpenAPIObject, SwaggerModule } from '@nestjs/swagger';
-import 'dotenv/config';
-import { AppModule, ObserveInstrument } from './app.module';
-import { packageSemver } from './lib/constants';
-import './polyfill';
 import {
   StandardSchemaSerializerInterceptor,
   StandardSchemaValidationPipe,
 } from '@nestjs/common';
+import { NestFactory, Reflector } from '@nestjs/core';
+import { DocumentBuilder, OpenAPIObject, SwaggerModule } from '@nestjs/swagger';
+import 'dotenv/config';
+import { Logger } from 'nestjs-pino';
+import { AppModule, ObserveInstrument } from './app.module';
+import { packageSemver } from './lib/constants';
+import './polyfill';
 
 const methods = [
   'get',
@@ -50,6 +51,7 @@ async function bootstrap() {
     instrument: ObserveInstrument,
   });
 
+  app.useLogger(app.get(Logger));
   app.useGlobalInterceptors(
     new StandardSchemaSerializerInterceptor(app.get(Reflector)),
   );

@@ -1,21 +1,12 @@
 import { major, parse } from 'semver';
-import { isAddress, type Address, type Chain } from 'viem';
-import { filecoin, filecoinCalibration } from 'viem/chains';
+import { isAddress, type Address } from 'viem';
+import { filecoin } from 'viem/chains';
 import * as z from 'zod';
 import packageJson from '../../package.json';
-
-type SupportedChainId = (typeof SUPPORTED_CHAINS)[number]['id'];
+import { SUPPORTED_CHAINS, SupportedChainId } from './filecoin-client';
 
 export const packageSemver = parse(packageJson.version);
 export const packageMajorVersion = packageSemver ? major(packageSemver) : 0;
-
-export const RECENT_NODE_CLIENT = 'RECENT_NODE_CLIENT';
-export const ARCHIVE_NODE_CLIENT = 'ARCHIVE_NODE_CLIENT';
-
-export const SUPPORTED_CHAINS = [
-  filecoin,
-  filecoinCalibration,
-] as const satisfies Chain[];
 
 const supportedChainId = z.coerce
   .number()

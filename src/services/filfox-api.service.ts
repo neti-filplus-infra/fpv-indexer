@@ -1,5 +1,8 @@
-import { RECENT_NODE_CLIENT } from '@/lib/constants';
-import type { ERC20Metadata, FilecoinPublicClient } from '@/lib/types';
+import {
+  type FilecoinPublicClient,
+  InjectRecentNodeClient,
+} from '@/lib/filecoin-client';
+import type { ERC20Metadata } from '@/lib/types';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { Inject, Injectable } from '@nestjs/common';
 import { type Address } from 'viem';
@@ -25,8 +28,8 @@ const erc20TokenResponseSchema = z
 export class FilfoxApiService {
   constructor(
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
-    @Inject(RECENT_NODE_CLIENT)
-    protected readonly recentNodeClient: FilecoinPublicClient,
+    @InjectRecentNodeClient()
+    private readonly recentNodeClient: FilecoinPublicClient,
   ) {}
 
   public async getContractDeploymentEpoch(

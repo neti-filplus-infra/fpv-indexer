@@ -1,22 +1,21 @@
 import ServiceRewardsActorABI from '@/abis/service-rewards-actor.abi';
 import { type TransactionContext } from '@/db/db';
 import { ServiceRewardsActorParameterType } from '@/db/enums';
-import { ARCHIVE_NODE_CLIENT, RECENT_NODE_CLIENT } from '@/lib/constants';
+import type {
+  ConfigShape,
+  ERC20Metadata,
+  Indexer,
+  IndexerBatchParameters,
+  LogForEvents,
+} from '@/lib/types';
 import { maxBigInt, numericToBigInt, sortLogs } from '@/lib/utils';
 import { ERC20TokenInfoService } from '@/services/erc-20-token-info.service';
 import { FilfoxApiService } from '@/services/filfox-api.service';
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { BigNumber } from 'bignumber.js';
 import { uniq } from 'es-toolkit';
 import { AbiEvent, Address, getAbiItem } from 'viem';
-import type {
-  ConfigShape,
-  ERC20Metadata,
-  FilecoinPublicClient,
-  LogForEvents,
-} from '../lib/types';
-import { AbstractIndexer, type GetChangesParameters } from './abstract.indexer';
 
 type EventType = (typeof events)[number];
 type Logs = LogForEvents<EventType>[];
@@ -76,29 +75,22 @@ const events = [
 ] as const satisfies AbiEvent[];
 
 @Injectable()
-export class ServiceRewardsActorIndexer extends AbstractIndexer<Logs> {
+export class ServiceRewardsActorIndexer implements Indexer<Logs> {
+  public name = ServiceRewardsActorIndexer.name;
+  private logger = new Logger(this.name);
+
   constructor(
-    protected readonly configService: ConfigService<ConfigShape, true>,
-    @Inject(RECENT_NODE_CLIENT)
-    protected readonly recentNodeClient: FilecoinPublicClient,
-    @Inject(ARCHIVE_NODE_CLIENT)
-    protected readonly archiveNodeClient: FilecoinPublicClient,
+    private readonly configService: ConfigService<ConfigShape, true>,
     private readonly filfoxApiService: FilfoxApiService,
     private readonly erc20Service: ERC20TokenInfoService,
-  ) {
-    super(configService, recentNodeClient, archiveNodeClient);
-  }
+  ) {}
 
-  public getName(): string {
-    return ServiceRewardsActorIndexer.name;
-  }
-
-  protected async getChanges({
+  public async getChanges({
     client,
     contractAddress,
     fromBlock,
     toBlock,
-  }: GetChangesParameters): Promise<Logs> {
+  }: IndexerBatchParameters): Promise<Logs> {
     const logs = await client.getLogs({
       address: contractAddress,
       events,
@@ -110,7 +102,7 @@ export class ServiceRewardsActorIndexer extends AbstractIndexer<Logs> {
     return sortLogs(logs);
   }
 
-  protected async updateDb(tx: TransactionContext, logs: Logs): Promise<void> {
+  public async updateDb(tx: TransactionContext, logs: Logs): Promise<void> {
     type MaybeMetadataPair = [Address, ERC20Metadata] | null;
 
     const admittedTokens = logs

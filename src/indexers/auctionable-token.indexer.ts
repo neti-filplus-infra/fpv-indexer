@@ -1,6 +1,9 @@
+import ERC20ABI from '@/abis/erc-20.abi';
+import FilecoinPayV1ABI from '@/abis/filecoin-pay-v1.abi';
 import { db, type TransactionContext } from '@/db/db';
 import type { DB } from '@/db/types';
-import type { TraceResult } from '@/lib/types';
+import type { TraceResult } from '@/lib/filecoin-client';
+import type { Indexer, IndexerBatchParameters } from '@/lib/types';
 import { numericToBigInt } from '@/lib/utils';
 import { Injectable } from '@nestjs/common';
 import { groupBy, mapValues, uniq } from 'es-toolkit';
@@ -14,9 +17,6 @@ import {
   isAddress,
   isAddressEqual,
 } from 'viem';
-import ERC20ABI from '../abis/erc-20.abi';
-import FilecoinPayV1ABI from '../abis/filecoin-pay-v1.abi';
-import { AbstractIndexer, type GetChangesParameters } from './abstract.indexer';
 
 type IndexedTraceResult = TraceResult & {
   callIndex: number;
@@ -41,17 +41,15 @@ type Changes = {
 const transferEvent = getAbiItem({ abi: ERC20ABI, name: 'Transfer' });
 
 @Injectable()
-export class AuctionableTokenIndexer extends AbstractIndexer<Changes> {
-  public getName(): string {
-    return AuctionableTokenIndexer.name;
-  }
+export class AuctionableTokenIndexer implements Indexer<Changes> {
+  public name = AuctionableTokenIndexer.name;
 
-  protected async getChanges({
+  public async getChanges({
     client,
     contractAddress,
     fromBlock,
     toBlock,
-  }: GetChangesParameters) {
+  }: IndexerBatchParameters) {
     const filecoinPayContractRows = await db
       .selectFrom('filecoin_pay_contract')
       .select('contract_address')
@@ -176,7 +174,7 @@ export class AuctionableTokenIndexer extends AbstractIndexer<Changes> {
     };
   }
 
-  protected async updateDb(
+  public async updateDb(
     tx: TransactionContext,
     changes: Changes,
   ): Promise<void> {

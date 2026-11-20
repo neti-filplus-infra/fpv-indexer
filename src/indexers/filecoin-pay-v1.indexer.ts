@@ -1,13 +1,16 @@
 import FilecoinPayV1ABI from '@/abis/filecoin-pay-v1.abi';
-import { TransactionContext } from '@/db/db';
-import { DB } from '@/db/types';
-import type { LogForEvents } from '@/lib/types';
+import type { TransactionContext } from '@/db/db';
+import type { DB } from '@/db/types';
+import type {
+  Indexer,
+  IndexerBatchParameters,
+  LogForEvents,
+} from '@/lib/types';
 import { sortLogs } from '@/lib/utils';
 import { Injectable } from '@nestjs/common';
-import { InsertObject } from 'kysely';
-import { getAbiItem, type AbiEvent } from 'viem';
-import { AbstractIndexer, type GetChangesParameters } from './abstract.indexer';
 import { chunk } from 'es-toolkit';
+import type { InsertObject } from 'kysely';
+import { getAbiItem, type AbiEvent } from 'viem';
 
 type EventType = (typeof events)[number];
 type Logs = LogForEvents<EventType>[];
@@ -19,17 +22,15 @@ const events = [
 ] as const satisfies AbiEvent[];
 
 @Injectable()
-export class FilecoinPayV1Indexer extends AbstractIndexer<Logs> {
-  public getName(): string {
-    return FilecoinPayV1Indexer.name;
-  }
+export class FilecoinPayV1Indexer implements Indexer<Logs> {
+  public name = FilecoinPayV1Indexer.name;
 
-  protected async getChanges({
+  public async getChanges({
     client,
     contractAddress,
     fromBlock,
     toBlock,
-  }: GetChangesParameters): Promise<Logs> {
+  }: IndexerBatchParameters): Promise<Logs> {
     const logs = await client.getLogs({
       address: contractAddress,
       events,
@@ -41,7 +42,7 @@ export class FilecoinPayV1Indexer extends AbstractIndexer<Logs> {
     return sortLogs(logs);
   }
 
-  protected async updateDb(tx: TransactionContext, logs: Logs): Promise<void> {
+  public async updateDb(tx: TransactionContext, logs: Logs): Promise<void> {
     const rails = this.getRailsInputs(logs);
 
     if (rails.length > 0) {

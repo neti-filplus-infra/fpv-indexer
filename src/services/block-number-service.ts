@@ -1,5 +1,7 @@
-import { RECENT_NODE_CLIENT } from '@/lib/constants';
-import type { FilecoinPublicClient } from '@/lib/types';
+import {
+  type FilecoinPublicClient,
+  InjectRecentNodeClient,
+} from '@/lib/filecoin-client';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { Inject, Injectable } from '@nestjs/common';
 
@@ -8,7 +10,7 @@ export class BlockNumberService {
   private static BLOCK_NUMBER_CACHE_KEY = `${BlockNumberService.name}_block_number`;
 
   constructor(
-    @Inject(RECENT_NODE_CLIENT)
+    @InjectRecentNodeClient()
     private readonly recentNodeClient: FilecoinPublicClient,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}

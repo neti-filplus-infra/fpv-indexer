@@ -1,6 +1,8 @@
 import ERC20ABI from '@/abis/erc-20.abi';
-import { RECENT_NODE_CLIENT } from '@/lib/constants';
-import type { FilecoinPublicClient } from '@/lib/types';
+import {
+  InjectRecentNodeClient,
+  type FilecoinPublicClient,
+} from '@/lib/filecoin-client';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { Inject, Injectable } from '@nestjs/common';
 import {
@@ -16,7 +18,7 @@ import {
 export class ERC20TokenInfoService {
   constructor(
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
-    @Inject(RECENT_NODE_CLIENT)
+    @InjectRecentNodeClient()
     private readonly recentNodeClient: FilecoinPublicClient,
   ) {}
 
