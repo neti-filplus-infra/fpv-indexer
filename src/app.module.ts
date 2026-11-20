@@ -44,6 +44,11 @@ const observeAppSecret = process.env.OBSERVE_APP_SECRET ?? null;
     LoggerModule.forRoot({
       pinoHttp: {
         level: process.env.NODE_ENV === 'test' ? 'silent' : 'debug',
+        formatters: {
+          level(label) {
+            return { level: label };
+          },
+        },
       },
     }),
     ConfigModule.forRoot({

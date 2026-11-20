@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.2.1](https://github.com/fidlabs/fpv-indexer/compare/v2.2.0...v2.2.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* **observability:** properly calculate average RPC call duration ([#61](https://github.com/fidlabs/fpv-indexer/issues/61)) ([50a3edd](https://github.com/fidlabs/fpv-indexer/commit/50a3edd9afeebcf2426444d1ffee427c8d2407e8))
+* **observability:** structurize logs ([#62](https://github.com/fidlabs/fpv-indexer/issues/62)) ([4ccee16](https://github.com/fidlabs/fpv-indexer/commit/4ccee1670e96eefa3747e5e52efc2ae8b638cea0))
+* **observability:** use string log levels ([#64](https://github.com/fidlabs/fpv-indexer/issues/64)) ([6f5e089](https://github.com/fidlabs/fpv-indexer/commit/6f5e08939b8e9d9aee16b9bb8b0668049dcedbd5))
+
 ## [2.2.0](https://github.com/fidlabs/fpv-indexer/compare/v2.1.1...v2.2.0) (2026-11-20)
 
 

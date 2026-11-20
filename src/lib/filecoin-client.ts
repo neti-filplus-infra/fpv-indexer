@@ -189,9 +189,7 @@ function createClientForChain({
           metrics.totalCallsCount += methods.length;
           metrics.totalCallsDurationMs += requestDurationMs;
           metrics.averageCallDurationMs =
-            metrics.totalCallsCount === 0
-              ? 0
-              : metrics.totalCallsDurationMs + metrics.averageCallDurationMs;
+            metrics.totalCallsDurationMs / metrics.totalCallsCount;
 
           for (const method of methods) {
             const methodMetrics = (metrics.rpcCallsByMethod[method] ??= {

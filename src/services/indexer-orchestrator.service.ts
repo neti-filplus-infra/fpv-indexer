@@ -4,14 +4,11 @@ import { FilecoinPayV1Indexer } from '@/indexers/filecoin-pay-v1.indexer';
 import { ServiceRewardsActorIndexer } from '@/indexers/service-rewards-actor.indexer';
 import { StreamWeightActorIndexer } from '@/indexers/stream-weight-actor.indexer';
 import { packageMajorVersion, packageSemver } from '@/lib/constants';
+import { StructuredLogger } from '@/lib/observability';
 import { IndexerStatus } from '@/lib/schemas';
 import { ConfigShape } from '@/lib/types';
 import { minBigInt, numericToBigInt } from '@/lib/utils';
-import {
-  Injectable,
-  Logger,
-  type OnApplicationBootstrap,
-} from '@nestjs/common';
+import { Injectable, type OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CronExpression, SchedulerRegistry } from '@nestjs/schedule';
 import { CronJob } from 'cron';
@@ -29,7 +26,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
     'indexer_orchestrator_retry_timeout';
 
   private isRunning: boolean = false;
-  private logger = new Logger(IndexerOrchestratorService.name);
+  private logger = new StructuredLogger(IndexerOrchestratorService.name);
 
   constructor(
     private readonly configService: ConfigService<ConfigShape, true>,
@@ -68,7 +65,10 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
 
   private async index() {
     if (this.isRunning) {
-      this.logger.debug('Indexing already in progress, skipping execution.');
+      this.logger.debug(
+        { event: 'indexer.run.skipped' },
+        'Indexing already in progress, skipping execution.',
+      );
       return;
     }
 
@@ -91,7 +91,13 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
       await this.execute();
     } catch (error) {
       this.logger.error(
-        { error },
+        {
+          event: 'indexer.run.error',
+          error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          retryTimeoutMs:
+            IndexerOrchestratorService.RETRY_TIMEOUT_SECONDS * 1000,
+        },
         `Error occured during indexing. Retrying in ${IndexerOrchestratorService.RETRY_TIMEOUT_SECONDS} seconds.`,
       );
 
@@ -168,6 +174,7 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
         } else {
           this.logger.warn(
             {
+              event: 'indexer.invalid_filecoin_pay_contract_stored',
               contractAddress,
             },
             'Invalid Filecoin Pay Contract stored',
@@ -189,7 +196,14 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
       const tokenAddress = token.token.toLowerCase();
 
       if (!isAddress(tokenAddress)) {
-        this.logger.warn({ tokenAddress }, 'Invalid token address stored');
+        this.logger.warn(
+          {
+            event: 'indexer.invalid_token_stored',
+            tokenAddress,
+            reason: 'invalid_address',
+          },
+          'Invalid token address stored',
+        );
         return;
       }
 
@@ -203,7 +217,14 @@ export class IndexerOrchestratorService implements OnApplicationBootstrap {
       }
 
       if (!isERC20) {
-        this.logger.warn({ tokenAddress }, 'Invalid ERC20 stored');
+        this.logger.warn(
+          {
+            event: 'indexer.invalid_token_stored',
+            tokenAddress,
+            reason: 'not_erc20',
+          },
+          'Invalid ERC20 stored',
+        );
         return;
       }
 

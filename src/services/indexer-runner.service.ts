@@ -1,16 +1,20 @@
 import { db } from '@/db/db';
+import { packageMajorVersion } from '@/lib/constants';
 import {
   InjectArchiveNodeClient,
   InjectRecentNodeClient,
   type FilecoinPublicClient,
 } from '@/lib/filecoin-client';
+import {
+  IndexerBatchResultContext,
+  StructuredLogger,
+} from '@/lib/observability';
 import type { ConfigShape, Indexer, IndexerRunParameters } from '@/lib/types';
 import { maxBigInt, numericToBigInt } from '@/lib/utils';
-import { Injectable, Logger } from '@nestjs/common';
+import { RpcMetricsContext } from '@/services/rpc-metrics-context.service';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TimeoutError } from 'viem';
-import { RpcMetricsContext } from './rpc-metrics-context.service';
-import { packageMajorVersion } from '@/lib/constants';
 
 @Injectable()
 export class IndexerRunner {
@@ -61,7 +65,10 @@ export class IndexerRunner {
 
       if (timeoutCount >= maxTimeouts) {
         logger.warn(
-          { maxTimeouts },
+          {
+            event: 'indexer.batch.rpc_timeout_retries_limit_reached',
+            maxTimeouts,
+          },
           'Timeout retry limit reached. Immediate retry will not trigger.',
         );
 
@@ -69,7 +76,11 @@ export class IndexerRunner {
       }
 
       logger.debug(
-        { timeoutsCount: nextTimeoutCount, maxTimeouts },
+        {
+          event: 'indexer.batch.rpc_timeout_retry',
+          timeoutsCount: nextTimeoutCount,
+          maxTimeouts,
+        },
         `Retrying immediately with lower batch size due to RPC call timeout.`,
       );
 
@@ -131,8 +142,9 @@ export class IndexerRunner {
         ) {
           logger.debug(
             {
-              maxBlockNumber,
-              indexedUpTo: lastRun.end_block,
+              event: 'indexer.batch.end_reached',
+              maxToEpoch: maxBlockNumber.toString(),
+              indexedUpToEpoch: lastRun.end_block,
             },
             'Nothing to index',
           );
@@ -188,8 +200,9 @@ export class IndexerRunner {
         if (fromBlock > maxToBlock) {
           logger.debug(
             {
-              maxBlockNumber,
-              indexedUpTo: lastRun?.end_block,
+              event: 'indexer.batch.end_reached',
+              maxToEpoch: maxBlockNumber?.toString(),
+              indexedUpToEpoch: lastRun?.end_block,
             },
             'Nothing to index',
           );
@@ -200,9 +213,11 @@ export class IndexerRunner {
         if (toBlock > finalizedHeight) {
           logger.warn(
             {
-              toEpoch: toBlock.toString(),
-              finalizedHeight,
-              finalizedHeightMaxDifference,
+              event: 'indexer.batch.finality_ignored',
+              batchEndEpoch: toBlock.toString(),
+              finalizedHeight: finalizedHeight.toString(),
+              finalizedHeightMaxDifference:
+                finalizedHeightMaxDifference?.toString(),
             },
             'Possible invalid data warning due to finality config.',
           );
@@ -210,8 +225,9 @@ export class IndexerRunner {
 
         logger.debug(
           {
-            fromEpoch: fromBlock.toString(),
-            toEpoch: toBlock.toString(),
+            event: 'indexer.batch.fetching_changes',
+            batchStartEpoch: fromBlock.toString(),
+            batchEndEpoch: toBlock.toString(),
             nodeType: shouldUseArchiveNode ? 'archive' : 'recent',
           },
           'Fetching changes',
@@ -257,23 +273,28 @@ export class IndexerRunner {
       error = caught;
       throw caught;
     } finally {
-      const params = {
+      const context = {
+        event: 'indexer.batch.result',
         indexer: indexer.name,
         contractAddress: parameters.contractAddress,
-        fromEpoch: range.fromEpoch?.toString(),
-        toEpoch: range.toEpoch?.toString(),
+        batchStartEpoch: range.fromEpoch?.toString(),
+        batchEndEpoch: range.toEpoch?.toString(),
+        error: !!error,
         timeoutCount,
-        changesReadDurationMs,
-        ...rpcMetrics,
-        changesWriteDurationMs,
-        totalDurationMs: performance.now() - startTime,
         keepRunning,
-      };
+        totalDurationMs: performance.now() - startTime,
+        changesReadDurationMs,
+        changesWriteDurationMs,
+        rpcCalls: rpcMetrics.totalCallsCount,
+        rpcTotalDurationMs: rpcMetrics.totalCallsDurationMs,
+        rpcCallAverageDurationMs: rpcMetrics.averageCallDurationMs,
+        rpcByMethod: rpcMetrics.rpcCallsByMethod,
+      } satisfies IndexerBatchResultContext;
 
       if (error) {
-        logger.error(params, 'Indexer batch attempt failed');
+        logger.error(context, 'Indexer batch attempt failed');
       } else {
-        logger.log(params, 'Indexer batch completed');
+        logger.log(context, 'Indexer batch completed');
       }
     }
   }
@@ -281,8 +302,8 @@ export class IndexerRunner {
   private createIndexerLogger(
     indexer: Indexer,
     parameters: IndexerRunParameters,
-  ): Logger {
-    return new Logger(
+  ): StructuredLogger {
+    return new StructuredLogger(
       `${indexer.name}:${parameters.contractAddress.toLowerCase()}`,
     );
   }
